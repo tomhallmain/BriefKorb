@@ -1,0 +1,34 @@
+# Example configuration for the email server
+# Copy this file to config.yaml and update with your settings
+
+# Microsoft Graph API settings
+microsoft:
+  enabled: true
+  client_id: "your_client_id"
+  client_secret: "your_client_secret"
+  tenant_id: "your_tenant_id"
+  redirect_uri: "http://localhost:8000/auth/microsoft/callback"
+  scopes:
+    - "https://graph.microsoft.com/Mail.Read"
+    - "https://graph.microsoft.com/Mail.Send"
+    - "https://graph.microsoft.com/Calendars.ReadWrite"
+    - "offline_access"
+  additional_settings:
+    api_version: "v1.0"
+    timeout: 30
+
+# Gmail API settings
+gmail:
+  enabled: true
+  credentials_path: "path/to/credentials.json"
+  redirect_uri: "http://localhost:8000/auth/gmail/callback"
+  scopes:
+    - "https://www.googleapis.com/auth/gmail.readonly"
+    - "https://www.googleapis.com/auth/gmail.send"
+  additional_settings:
+    batch_size: 100
+    timeout: 30
+
+# General settings
+token_storage_path: "tokens"
+log_level: "INFO" 

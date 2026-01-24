@@ -1,0 +1,130 @@
+{% extends "django_app/base.html" %}
+{% block content %}
+<div class="container mt-4">
+    <div class="row">
+        <div class="col">
+            <h1>Message Data</h1>
+        </div>
+    </div>
+    <br>
+    
+    {% if messages %}
+        {% for message in messages %}
+            <div class="alert alert-{{ message.tags }} alert-dismissible fade show" role="alert">
+                {{ message }}
+                <button type="button" class="close" data-dismiss="alert" aria-label="Close">
+                    <span aria-hidden="true">&times;</span>
+                </button>
+            </div>
+        {% endfor %}
+    {% endif %}
+    
+    {% if error %}
+        <div class="alert alert-danger" role="alert">
+            {{ error }}
+        </div>
+    {% endif %}
+    
+    {% if messages_length %}
+    <div class="row">
+        <div class="col">
+            <div>Total messages retrieved from <strong>{{ mailbox }}</strong> folder: <strong>{{ messages_length }}</strong></div>
+        </div>
+        <div class="col">
+            {% if messageData and messageData|length %}
+                <div>Total unique sender names in message data: <strong>{{ messageData|length }}</strong></div>
+            {% else %}
+                <div>Failed to retrieve message data from mailbox <strong>{{ mailbox }}</strong></div>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+    <br>
+    
+    <form method="POST">
+        {% csrf_token %}
+        <div class="row">
+            <div class="col">
+                <button type="submit" name="markAsRead" class="btn btn-primary btn-sm mb-3">Mark Messages As Read</button>
+            </div>
+            <div class="col">
+                <button type="submit" name="deleteMessage" class="btn btn-danger btn-sm mb-3">Delete Messages</button>
+            </div>
+            <div class="col">
+                <button type="submit" name="deleteMessageBlockSender" class="btn btn-warning btn-sm mb-3">Delete Messages And Block Senders</button>
+            </div>
+        </div>
+        <br>
+        <div class="row">
+            <div class="col">
+                <input type="checkbox" id="selectAll" onchange="toggleSelectAll()">
+                <label for="selectAll">Select All</label>
+            </div>
+            <div class="col">
+                <label>Change Mailbox:</label>
+                <select name="mailbox" class="form-control d-inline-block" style="width: auto;">
+                    <option value="inbox" {% if mailbox == 'inbox' %}selected{% endif %}>Inbox</option>
+                    <option value="junkemail" {% if mailbox == 'junkemail' %}selected{% endif %}>Junk</option>
+                </select>
+                <button type="submit" name="mailbox" class="btn btn-secondary btn-sm ml-2">Update</button>
+            </div>
+            <div class="col">
+                <label>
+                    <input type="checkbox" name="excludeRead" value="excludeRead" {% if exclude_read_messages %}checked{% endif %}>
+                    Only include unread
+                </label>
+                <button type="submit" name="excludeRead" class="btn btn-secondary btn-sm ml-2">Update</button>
+            </div>
+        </div>
+        <br>
+        <table class="table sortable">
+            <thead>
+                <tr>
+                    <th scope="col">Select</th>
+                    <th scope="col">From Name</th>
+                    <th scope="col">From Address</th>
+                    <th scope="col">Subject</th>
+                    <th scope="col">Last Received</th>
+                    <th scope="col">Count</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% if messageData %}
+                    {% for messageInfo in messageData %}
+                        <tr>
+                            <td>
+                                <input type="checkbox" name="selected_options" value="{{ messageInfo.fromName }}">
+                            </td>
+                            <td>{{ messageInfo.fromName }}</td>
+                            <td>{{ messageInfo.fromAddress }}</td>
+                            <td>{{ messageInfo.subject }}</td>
+                            <td>
+                                {% if messageInfo.lastReceivedDateTime %}
+                                    {{ messageInfo.lastReceivedDateTime|date:"n/d/Y g:i A" }}
+                                {% else %}
+                                    N/A
+                                {% endif %}
+                            </td>
+                            <td>{{ messageInfo.count }}</td>
+                        </tr>
+                    {% endfor %}
+                {% else %}
+                    <tr>
+                        <td colspan="6" class="text-center text-muted">No messages found</td>
+                    </tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </form>
+</div>
+
+{% load static %}
+<script type="text/javascript" src="{% static 'sortable/sortable.js' %}"></script>
+<script>
+function toggleSelectAll() {
+    const selectAll = document.getElementById('selectAll');
+    const checkboxes = document.querySelectorAll('input[name="selected_options"]');
+    checkboxes.forEach(cb => cb.checked = selectAll.checked);
+}
+</script>
+{% endblock %}

@@ -1,0 +1,22 @@
+{% extends "django_app/base.html" %}
+{% block content %}
+<div class="container mt-4">
+    <div class="jumbotron">
+        <h1 class="display-4">BriefKorb</h1>
+        <p class="lead">Unified email and calendar management across multiple providers</p>
+        {% if is_authenticated and user %}
+            <hr class="my-4">
+            <h4>Welcome {{ user.name }}!</h4>
+            <p>Use the navigation bar at the top of the page to get started.</p>
+            <div class="mt-3">
+                <a href="{% url 'django_app.calendar:calendar' %}" class="btn btn-primary mr-2">View Calendar</a>
+                <a href="{% url 'django_app.messages:messages' %}" class="btn btn-secondary">View Messages</a>
+            </div>
+        {% else %}
+            <hr class="my-4">
+            <p>Please authenticate with Microsoft or Gmail using the BriefKorb desktop application first.</p>
+            <p class="text-muted">Once authenticated, you can view your calendar and messages here.</p>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
