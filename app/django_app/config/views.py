@@ -103,7 +103,7 @@ def settings_view(request):
         except Exception as e:
             django_messages.error(request, f'Failed to save settings: {e}')
 
-        return redirect('django_app.settings:settings')
+        return redirect('django_app.config:settings')
 
     # --- GET ---
     ms_scopes = set(config.microsoft.scopes or [])
@@ -120,4 +120,4 @@ def settings_view(request):
         'ms_auth_user': auth_status['microsoft'],
         'gmail_auth_user': auth_status['gmail'],
     }
-    return render(request, 'django_app/settings/settings.html', context)
+    return render(request, 'django_app/config/settings.html', context)

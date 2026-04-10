@@ -11,7 +11,7 @@ urlpatterns = [
     path('', include('django_app.oauth.urls')),
     path('', include('django_app.calendar.urls')),
     path('', include('django_app.messages.urls')),
-    path('', include('django_app.settings.urls')),
+    path('', include('django_app.config.urls')),
     path('admin/', admin.site.urls),
 ]
 
