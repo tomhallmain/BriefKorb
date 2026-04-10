@@ -425,7 +425,7 @@ class AuthSettingsDialog(QDialog):
                 "Microsoft Graph API is not enabled. Please enable it first."
             )
             return
-        
+
         if not self.config.microsoft.client_id:
             QMessageBox.warning(
                 self,
@@ -433,26 +433,23 @@ class AuthSettingsDialog(QDialog):
                 "Please configure Microsoft client_id and client_secret first."
             )
             return
-        
-        # Generate auth URL using MSAL (simplified - would need proper OAuth flow)
-        tenant = self.config.microsoft.tenant_id or "common"
-        scopes = " ".join(self.config.microsoft.scopes or [])
-        auth_url = (
-            f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize"
-            f"?client_id={self.config.microsoft.client_id}"
-            f"&response_type=code"
-            f"&redirect_uri={self.config.microsoft.redirect_uri}"
-            f"&scope={scopes}"
-            f"&response_mode=query"
-        )
+
+        # Derive the sign-in URL from the configured redirect URI so the Django server
+        # initiates the MSAL flow and stores the flow dict in its session — this means
+        # the callback can use acquire_token_by_auth_code_flow with full PKCE/state validation.
+        from urllib.parse import urlparse
+        redirect_uri = self.config.microsoft.redirect_uri or "http://localhost:8000/auth/microsoft/callback"
+        parsed = urlparse(redirect_uri)
+        signin_url = f"{parsed.scheme}://{parsed.netloc}/auth/microsoft/signin"
+
         # Clear any existing status file
         app_dir = Path(__file__).parent.parent.parent
         status_file = app_dir / 'email_server' / '.microsoft_auth_status.json'
         if status_file.exists():
             status_file.unlink()
-        
-        QDesktopServices.openUrl(QUrl(auth_url))
-        
+
+        QDesktopServices.openUrl(QUrl(signin_url))
+
         # Start polling for authentication completion
         self._start_auth_status_polling('microsoft')
     
@@ -490,35 +487,21 @@ class AuthSettingsDialog(QDialog):
             return
         
         try:
-            # Use Gmail OAuth to generate auth URL
-            from email_server.auth import GmailOAuth
-            from email_server.auth import TokenManager
-            
-            # Get scopes from config
-            scopes = self.config.gmail.scopes or [
-                "https://www.googleapis.com/auth/gmail.readonly",
-                "https://www.googleapis.com/auth/gmail.send"
-            ]
-            
-            # Initialize Gmail OAuth
-            token_manager = TokenManager()
-            gmail_oauth = GmailOAuth(
-                credentials_path=str(credentials_path),
-                redirect_uri=self.config.gmail.redirect_uri or "http://localhost:8000/auth/gmail/callback",
-                token_manager=token_manager
-            )
-            
-            # Generate auth URL
-            auth_url = gmail_oauth.get_auth_url()
-            
+            # Route through the Django server's sign-in endpoint so the flow is handled
+            # consistently (same path as web-based sign-in).
+            from urllib.parse import urlparse
+            redirect_uri = self.config.gmail.redirect_uri or "http://localhost:8000/auth/gmail/callback"
+            parsed = urlparse(redirect_uri)
+            signin_url = f"{parsed.scheme}://{parsed.netloc}/auth/gmail/signin"
+
             # Clear any existing status file
             app_dir = Path(__file__).parent.parent.parent
             status_file = app_dir / 'email_server' / '.gmail_auth_status.json'
             if status_file.exists():
                 status_file.unlink()
-            
-            QDesktopServices.openUrl(QUrl(auth_url))
-            
+
+            QDesktopServices.openUrl(QUrl(signin_url))
+
             # Start polling for authentication completion
             self._start_auth_status_polling('gmail')
         except Exception as e:

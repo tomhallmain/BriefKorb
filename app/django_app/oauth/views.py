@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from email_server.config import EmailServerConfig
 from email_server.auth import MicrosoftOAuth, GmailOAuth, TokenManager
+import msal
 
 
 def _get_app_dir():
@@ -59,19 +60,23 @@ def microsoft_callback(request):
         if not code:
             error = request.GET.get('error', 'Unknown error')
             return _error_response("Authentication Failed", f"Error: {error}")
-        
+
         # Load config
         app_dir = _get_app_dir()
         config_path = app_dir / 'email_server' / 'config.yaml'
-        
+
         if not config_path.exists():
             return _error_response("Configuration Error", "Configuration file not found. Please configure BriefKorb first.")
-        
+
         config = EmailServerConfig.from_file(str(config_path))
-        
+
         if not config.microsoft.enabled:
             return _error_response("Configuration Error", "Microsoft Graph is not configured. Please configure it in BriefKorb settings.")
-        
+
+        # Pop the flow before doing anything else — its presence tells us this was a web sign-in
+        flow = request.session.pop('microsoft_auth_flow', None)
+        was_web_signin = flow is not None
+
         # Initialize OAuth and token manager
         token_manager = TokenManager(storage_path=config.token_storage_path)
         microsoft_oauth = MicrosoftOAuth(
@@ -82,12 +87,8 @@ def microsoft_callback(request):
             token_manager=token_manager,
             scopes=config.microsoft.scopes
         )
-        
-        # Try to get flow from session (web-based sign-in) or create new one
-        flow = request.session.pop('microsoft_auth_flow', None)
-        
+
         # Exchange code for token using MSAL
-        import msal
         cache = msal.SerializableTokenCache()
         auth_app = msal.ConfidentialClientApplication(
             config.microsoft.client_id,
@@ -95,28 +96,26 @@ def microsoft_callback(request):
             client_credential=config.microsoft.client_secret,
             token_cache=cache
         )
-        
-        # Use flow from session if available, otherwise use acquire_token_by_authorization_code
+
+        # Use flow from session if available (web sign-in), otherwise use the simpler code exchange
         if flow:
-            # Use the stored flow from web sign-in
-            request_dict = {'code': code}
-            result = auth_app.acquire_token_by_auth_code_flow(flow, request_dict)
+            result = auth_app.acquire_token_by_auth_code_flow(flow, {'code': code})
         else:
-            # Fallback for desktop app (no flow in session)
+            # Desktop app path: no MSAL flow was stored, fall back to direct code exchange
             result = auth_app.acquire_token_by_authorization_code(
                 code,
                 scopes=config.microsoft.scopes or microsoft_oauth.scopes,
                 redirect_uri=config.microsoft.redirect_uri
             )
-        
+
         if "error" in result:
             return _error_response("Authentication Failed", f"Error: {result.get('error_description', result.get('error'))}")
-        
+
         # Get user info
         user = microsoft_oauth.get_user_info(result.get('access_token'))
         user_email = user.get('email') or user.get('userPrincipalName') or 'microsoft_user'
-        
-        # Convert MSAL token format to our token format
+
+        # Build token data, including the MSAL cache so silent refresh works later
         token_data = {
             'access_token': result.get('access_token'),
             'refresh_token': result.get('refresh_token'),
@@ -124,11 +123,13 @@ def microsoft_callback(request):
             'token_type': result.get('token_type', 'Bearer'),
             'scope': ' '.join(result.get('scope', [])),
         }
-        
+        if cache.has_state_changed:
+            token_data['msal_cache'] = cache.serialize()
+
         # Store tokens
         token_manager.store_token(user_email, token_data)
         token_manager.store_user_info(user_email, user)
-        
+
         # Store user in session for web-based authentication
         request.session['user'] = {
             'is_authenticated': True,
@@ -136,7 +137,7 @@ def microsoft_callback(request):
             'email': user_email,
             'userPrincipalName': user.get('userPrincipalName', user_email)
         }
-        
+
         # Write status file (for desktop app compatibility)
         status_file = app_dir / 'email_server' / '.microsoft_auth_status.json'
         status_data = {
@@ -147,11 +148,10 @@ def microsoft_callback(request):
         }
         with open(status_file, 'w') as f:
             json.dump(status_data, f)
-        
-        # Redirect to home page if this was a web sign-in (user is now in session), otherwise show success page
-        if request.session.get('user', {}).get('is_authenticated'):
+
+        if was_web_signin:
             return HttpResponseRedirect(reverse('django_app.home:home'))
-        
+
         return _success_response("Authentication Successful!", "You have successfully authenticated with Microsoft Graph API.")
         
     except Exception as e:
@@ -172,7 +172,7 @@ def microsoft_callback(request):
                 json.dump(status_data, f)
         except:
             pass
-        
+
         return _error_response("Authentication Failed", str(e), "Error details have been logged. Please restart BriefKorb if you just updated the code.")
 
 
@@ -217,20 +217,19 @@ def gmail_callback(request):
             token_manager=token_manager
         )
         
-        # Try to get flow from session (web-based sign-in) or create new one
-        flow = request.session.pop('gmail_auth_flow', None)
-        if flow:
-            # Use the stored flow from web sign-in
-            gmail_oauth.flow = flow
-        else:
-            # Fallback for desktop app - create new flow
-            from google_auth_oauthlib.flow import InstalledAppFlow
-            flow = InstalledAppFlow.from_client_secrets_file(
-                str(credentials_path),
-                scopes=scopes,
-                redirect_uri=redirect_uri
-            )
-            gmail_oauth.flow = flow
+        # Determine whether this was triggered from the web sign-in endpoint
+        was_web_signin = request.session.pop('gmail_web_signin', False)
+
+        # Always create a fresh flow from the credentials file — InstalledAppFlow is not
+        # session-serializable, and Gmail's token endpoint only needs client credentials +
+        # redirect_uri to exchange the code, so no shared state is required.
+        from google_auth_oauthlib.flow import InstalledAppFlow
+        flow = InstalledAppFlow.from_client_secrets_file(
+            str(credentials_path),
+            scopes=scopes,
+            redirect_uri=redirect_uri
+        )
+        gmail_oauth.flow = flow
         
         # Exchange code for tokens
         token_data = gmail_oauth.get_token_from_code(code)
@@ -276,10 +275,9 @@ def gmail_callback(request):
         with open(status_file, 'w') as f:
             json.dump(status_data, f)
         
-        # Redirect to home page if this was a web sign-in (user is now in session), otherwise show success page
-        if request.session.get('user', {}).get('is_authenticated'):
+        if was_web_signin:
             return HttpResponseRedirect(reverse('django_app.home:home'))
-        
+
         return _success_response("Authentication Successful!", "Gmail authentication completed successfully.")
         
     except Exception as e:
@@ -301,5 +299,80 @@ def gmail_callback(request):
                 json.dump(status_data, f)
         except Exception as save_error:
             print(f"Failed to save error status: {save_error}")
-        
+
         return _error_response("Authentication Failed", str(e), "Error details have been logged. Please restart BriefKorb if you just updated the code.")
+
+
+def sign_in_microsoft(request):
+    """Initiate Microsoft OAuth flow via MSAL and redirect to the authorization page"""
+    try:
+        app_dir = _get_app_dir()
+        config_path = app_dir / 'email_server' / 'config.yaml'
+
+        if not config_path.exists():
+            return _error_response("Configuration Error", "Configuration file not found. Please configure BriefKorb first.")
+
+        config = EmailServerConfig.from_file(str(config_path))
+
+        if not config.microsoft.enabled:
+            return _error_response("Configuration Error", "Microsoft Graph is not configured. Please configure it in BriefKorb settings.")
+
+        authority = f"https://login.microsoftonline.com/{config.microsoft.tenant_id or 'common'}"
+        auth_app = msal.ConfidentialClientApplication(
+            config.microsoft.client_id,
+            authority=authority,
+            client_credential=config.microsoft.client_secret,
+        )
+        flow = auth_app.initiate_auth_code_flow(
+            scopes=config.microsoft.scopes or [],
+            redirect_uri=config.microsoft.redirect_uri,
+        )
+        # Store the flow so the callback can use acquire_token_by_auth_code_flow
+        request.session['microsoft_auth_flow'] = flow
+        return HttpResponseRedirect(flow['auth_uri'])
+
+    except Exception as e:
+        return _error_response("Sign-in Error", str(e))
+
+
+def sign_in_gmail(request):
+    """Initiate Gmail OAuth flow and redirect to the authorization page"""
+    try:
+        app_dir = _get_app_dir()
+        config_path = app_dir / 'email_server' / 'config.yaml'
+
+        if not config_path.exists():
+            return _error_response("Configuration Error", "Configuration file not found. Please configure BriefKorb first.")
+
+        config = EmailServerConfig.from_file(str(config_path))
+
+        if not config.gmail.enabled or not config.gmail.credentials_path:
+            return _error_response("Configuration Error", "Gmail is not configured. Please configure it in BriefKorb settings.")
+
+        credentials_path = Path(config.gmail.credentials_path)
+        if not credentials_path.is_absolute():
+            credentials_path = app_dir / credentials_path
+
+        if not credentials_path.exists():
+            return _error_response("Configuration Error", f"Gmail credentials file not found at: {credentials_path}")
+
+        token_manager = TokenManager(storage_path=config.token_storage_path)
+        redirect_uri = config.gmail.redirect_uri or "http://localhost:8000/auth/gmail/callback"
+        gmail_oauth = GmailOAuth(
+            credentials_path=str(credentials_path),
+            redirect_uri=redirect_uri,
+            token_manager=token_manager,
+        )
+        auth_url = gmail_oauth.get_auth_url()
+        # Mark this as a web sign-in so the callback redirects to the home page
+        request.session['gmail_web_signin'] = True
+        return HttpResponseRedirect(auth_url)
+
+    except Exception as e:
+        return _error_response("Sign-in Error", str(e))
+
+
+def sign_out(request):
+    """Sign out the current user by clearing the session"""
+    request.session.flush()
+    return HttpResponseRedirect(reverse('django_app.home:home'))

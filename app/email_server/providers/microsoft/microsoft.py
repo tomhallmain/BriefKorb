@@ -111,7 +111,7 @@ class MicrosoftGraphProvider(EmailProvider):
         
         return response
     
-    def get_messages(self, user_id: str, folder: str = 'inbox', unread_only: bool = False, max_results: int = 10) -> List[EmailMessage]:
+    def get_messages(self, user_id: str, folder: str = 'inbox', unread_only: bool = False, max_messages: int = 10) -> List[EmailMessage]:
         """Get messages from specified folder
         
         Note: user_id is used to retrieve the token, but the API call uses /me
@@ -126,7 +126,7 @@ class MicrosoftGraphProvider(EmailProvider):
                 f"{self.base_url}/me/mailFolders/{folder}/messages",
                 headers=headers,
                 params={
-                    '$top': max_results,
+                    '$top': max_messages,
                     '$filter': filter_query,
                     '$select': 'id,subject,from,receivedDateTime,isRead',
                     '$orderby': 'receivedDateTime desc'

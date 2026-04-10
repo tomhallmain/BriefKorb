@@ -59,9 +59,9 @@ app/
    ```bash
    pip install -r app/requirements.txt
    ```
-4. Copy `oauth_settings.yml.example` to `oauth_settings.yml` and configure your API credentials:
+4. Copy `email_server/config.example.yaml` to `email_server/config.yaml` and fill in your API credentials:
    ```bash
-   cp app/oauth_settings.yml.example app/oauth_settings.yml
+   cp app/email_server/config.example.yaml app/email_server/config.yaml
    ```
 5. Run migrations:
    ```bash
@@ -122,18 +122,27 @@ The Django web application (`django_app/`) provides:
 
 ## API Credentials
 
-You'll need to set up API credentials for both Microsoft Graph API and Gmail API:
+You'll need to set up API credentials for both Microsoft Graph API and Gmail API. All credentials are stored in `app/email_server/config.yaml` (copy from `config.example.yaml`).
 
-1. Microsoft Graph API:
-   - Register an application in Azure Portal
-   - Configure OAuth 2.0 settings
-   - Add credentials to `oauth_settings.yml`
+### Microsoft Graph API
 
-2. Gmail API:
-   - Create a project in Google Cloud Console
-   - Enable Gmail API
-   - Configure OAuth 2.0 credentials
-   - Add credentials to `oauth_settings.yml`
+1. Register an application in the [Azure Portal](https://portal.azure.com) → Azure Active Directory → App registrations
+2. Add a redirect URI: `http://localhost:8000/auth/microsoft/callback` (Web platform)
+3. Create a client secret under Certificates & secrets
+4. Note the Application (client) ID, client secret value, and your Directory (tenant) ID
+5. Under API permissions, add the following Microsoft Graph delegated permissions:
+   - `Mail.Read`
+   - `Mail.Send`
+   - `offline_access` (required for token refresh — without this users must re-authenticate every hour)
+6. Fill in `client_id`, `client_secret`, `tenant_id`, and `redirect_uri` in `config.yaml`
+
+### Gmail API
+
+1. Create a project in [Google Cloud Console](https://console.cloud.google.com)
+2. Enable the Gmail API
+3. Create OAuth 2.0 credentials (Desktop app type), download `credentials.json`
+4. Add `http://localhost:8000/auth/gmail/callback` as an authorised redirect URI
+5. Set `credentials_path` in `config.yaml` to the path of your downloaded `credentials.json`
 
 ## Architecture
 

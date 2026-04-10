@@ -45,12 +45,15 @@ django_app/
 
 ## Authentication
 
-The web app supports two authentication methods:
+The web app supports two authentication methods, both of which route through the same Django sign-in endpoints:
 
-1. **Web-based**: Users can sign in directly from the web interface
-2. **Desktop app tokens**: Web app can use tokens authenticated via desktop app
+1. **Web-based**: Users visit `/auth/microsoft/signin` or `/auth/gmail/signin` directly in a browser. Django initiates the OAuth flow (using MSAL for Microsoft), stores the provider-specific flow state in the Django session, and redirects to the provider's authorization page. On return, `/auth/microsoft/callback` or `/auth/gmail/callback` completes the exchange and redirects to the home page.
+
+2. **Desktop app**: The PySide6 app opens a browser to the same `/auth/microsoft/signin` or `/auth/gmail/signin` URL. The Django server handles the full OAuth flow identically to the web-based path. When the callback completes it also writes a status file (`.microsoft_auth_status.json` / `.gmail_auth_status.json` in `email_server/`) that the desktop app polls for to detect completion.
 
 Both methods use the same `TokenManager` for token storage, so tokens are shared between desktop and web.
+
+> **Note for Microsoft**: The `offline_access` scope must be included in `config.yaml` for MSAL to receive a refresh token. Without it, silent token refresh will fail and users will need to re-authenticate every hour.
 
 ## Running
 

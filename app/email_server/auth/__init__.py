@@ -237,7 +237,4 @@ class TokenManager:
 from .microsoft import MicrosoftOAuth
 from .gmail import GmailOAuth
 
-# Export token classes
 __all__ = ['OAuthProvider', 'TokenManager', 'BaseToken', 'MicrosoftToken', 'GmailToken', 'MicrosoftOAuth', 'GmailOAuth']
-
-__all__ = ['OAuthProvider', 'TokenManager', 'MicrosoftOAuth', 'GmailOAuth'] 

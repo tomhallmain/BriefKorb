@@ -12,6 +12,8 @@ oauth_settings.yml
 app/email_server/config.yaml
 app/oauth_settings.yml
 
+.claudeignore
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
