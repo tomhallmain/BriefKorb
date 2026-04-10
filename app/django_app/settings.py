@@ -30,6 +30,7 @@ INSTALLED_APPS = [
     'django_app.home',
     'django_app.calendar',
     'django_app.messages',
+    'django_app.settings',
 ]
 
 # Optionally include legacy tutorial UI (preserved for historical purposes)

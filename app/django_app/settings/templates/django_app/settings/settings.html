@@ -1,0 +1,201 @@
+{% extends "django_app/base.html" %}
+{% block title %}Settings — BriefKorb{% endblock %}
+
+{% block extra_css %}
+<style>
+  .auth-status-ok   { color: #28a745; font-style: normal; }
+  .auth-status-none { color: #6c757d; font-style: italic; }
+  .scope-note       { font-size: 0.85em; color: #6c757d; }
+  .tab-pane         { padding-top: 1.5rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<h2 class="mb-4">Settings</h2>
+
+{% if messages %}
+  {% for message in messages %}
+    <div class="alert alert-{{ message.tags }} alert-dismissible fade show" role="alert">
+      {{ message }}
+      <button type="button" class="close" data-dismiss="alert"><span>&times;</span></button>
+    </div>
+  {% endfor %}
+{% endif %}
+
+<form method="post">
+  {% csrf_token %}
+
+  <ul class="nav nav-tabs" id="settingsTabs" role="tablist">
+    <li class="nav-item">
+      <a class="nav-link active" id="ms-tab"    data-toggle="tab" href="#microsoft" role="tab">Microsoft</a>
+    </li>
+    <li class="nav-item">
+      <a class="nav-link"        id="gmail-tab" data-toggle="tab" href="#gmail"     role="tab">Gmail</a>
+    </li>
+    <li class="nav-item">
+      <a class="nav-link"        id="gen-tab"   data-toggle="tab" href="#general"   role="tab">General</a>
+    </li>
+  </ul>
+
+  <div class="tab-content border border-top-0 rounded-bottom p-4 bg-white">
+
+    <!-- ── Microsoft ── -->
+    <div class="tab-pane fade show active" id="microsoft" role="tabpanel">
+
+      <div class="form-group form-check">
+        <input type="checkbox" class="form-check-input" id="ms_enabled" name="ms_enabled"
+               {% if config.microsoft.enabled %}checked{% endif %}>
+        <label class="form-check-label" for="ms_enabled">Enable Microsoft Graph API</label>
+      </div>
+
+      <div class="mb-3">
+        {% if ms_auth_user %}
+          <span class="auth-status-ok">&#10003; Authenticated as {{ ms_auth_user }}</span>
+        {% else %}
+          <span class="auth-status-none">Not authenticated</span>
+        {% endif %}
+        <a href="{% url 'django_app.oauth:sign_in_microsoft' %}" class="btn btn-sm btn-outline-primary ml-3">
+          Sign in with Microsoft
+        </a>
+      </div>
+
+      <div class="form-group">
+        <label for="ms_client_id">Client ID</label>
+        <input type="text" class="form-control" id="ms_client_id" name="ms_client_id"
+               placeholder="Application (client) ID"
+               value="{{ config.microsoft.client_id|default:'' }}">
+      </div>
+
+      <div class="form-group">
+        <label for="ms_client_secret">Client Secret</label>
+        <input type="password" class="form-control" id="ms_client_secret" name="ms_client_secret"
+               placeholder="Leave blank to keep existing value"
+               value="{{ config.microsoft.client_secret|default:'' }}"
+               autocomplete="new-password">
+      </div>
+
+      <div class="form-group">
+        <label for="ms_tenant_id">Tenant ID</label>
+        <input type="text" class="form-control" id="ms_tenant_id" name="ms_tenant_id"
+               placeholder="common  or  your-tenant-id"
+               value="{{ config.microsoft.tenant_id|default:'' }}">
+      </div>
+
+      <div class="form-group">
+        <label for="ms_redirect_uri">Redirect URI</label>
+        <input type="text" class="form-control" id="ms_redirect_uri" name="ms_redirect_uri"
+               placeholder="http://localhost:8000/auth/microsoft/callback"
+               value="{{ config.microsoft.redirect_uri|default:'' }}">
+      </div>
+
+      <fieldset class="form-group">
+        <legend class="col-form-label pt-0">Permissions (Scopes)</legend>
+        {% for scope in ms_available_scopes %}
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox"
+                   id="ms_scope_{{ forloop.counter }}"
+                   name="ms_scopes" value="{{ scope.value }}"
+                   {% if scope.value in ms_current_scopes %}checked{% endif %}>
+            <label class="form-check-label" for="ms_scope_{{ forloop.counter }}">
+              {{ scope.label }}
+            </label>
+          </div>
+        {% endfor %}
+        <p class="scope-note mt-1">
+          <code>offline_access</code> is always included — it is required for background token refresh.
+        </p>
+      </fieldset>
+
+    </div><!-- /microsoft -->
+
+    <!-- ── Gmail ── -->
+    <div class="tab-pane fade" id="gmail" role="tabpanel">
+
+      <div class="form-group form-check">
+        <input type="checkbox" class="form-check-input" id="gmail_enabled" name="gmail_enabled"
+               {% if config.gmail.enabled %}checked{% endif %}>
+        <label class="form-check-label" for="gmail_enabled">Enable Gmail API</label>
+      </div>
+
+      <div class="mb-3">
+        {% if gmail_auth_user %}
+          <span class="auth-status-ok">&#10003; Authenticated as {{ gmail_auth_user }}</span>
+        {% else %}
+          <span class="auth-status-none">Not authenticated</span>
+        {% endif %}
+        <a href="{% url 'django_app.oauth:sign_in_gmail' %}" class="btn btn-sm btn-outline-primary ml-3">
+          Sign in with Gmail
+        </a>
+      </div>
+
+      <div class="form-group">
+        <label for="gmail_credentials_path">Credentials File Path</label>
+        <input type="text" class="form-control" id="gmail_credentials_path" name="gmail_credentials_path"
+               placeholder="google_credentials.json"
+               value="{{ config.gmail.credentials_path|default:'' }}">
+        <small class="form-text text-muted">
+          Path to the OAuth 2.0 credentials JSON downloaded from Google Cloud Console.
+          Relative paths are resolved from the <code>app/</code> directory.
+        </small>
+      </div>
+
+      <div class="form-group">
+        <label for="gmail_redirect_uri">Redirect URI</label>
+        <input type="text" class="form-control" id="gmail_redirect_uri" name="gmail_redirect_uri"
+               placeholder="http://localhost:8000/auth/gmail/callback"
+               value="{{ config.gmail.redirect_uri|default:'' }}">
+      </div>
+
+      <fieldset class="form-group">
+        <legend class="col-form-label pt-0">Permissions (Scopes)</legend>
+        {% for scope in gmail_available_scopes %}
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox"
+                   id="gmail_scope_{{ forloop.counter }}"
+                   name="gmail_scopes" value="{{ scope.value }}"
+                   {% if scope.value in gmail_current_scopes %}checked{% endif %}>
+            <label class="form-check-label" for="gmail_scope_{{ forloop.counter }}">
+              {{ scope.label }}
+            </label>
+          </div>
+        {% endfor %}
+      </fieldset>
+
+    </div><!-- /gmail -->
+
+    <!-- ── General ── -->
+    <div class="tab-pane fade" id="general" role="tabpanel">
+
+      <div class="form-group">
+        <label for="token_storage_path">Token Storage Path</label>
+        <input type="text" class="form-control" id="token_storage_path" name="token_storage_path"
+               placeholder="tokens"
+               value="{{ config.token_storage_path|default:'tokens' }}">
+        <small class="form-text text-muted">
+          Directory where OAuth tokens are persisted. Relative paths resolve from <code>app/</code>.
+        </small>
+      </div>
+
+      <div class="form-group">
+        <label for="log_level">Log Level</label>
+        <select class="form-control w-auto" id="log_level" name="log_level">
+          {% for level in log_levels %}
+            <option value="{{ level }}"
+              {% if level == config.log_level|upper %}selected{% endif %}>
+              {{ level }}
+            </option>
+          {% endfor %}
+        </select>
+      </div>
+
+    </div><!-- /general -->
+
+  </div><!-- /tab-content -->
+
+  <div class="mt-3">
+    <button type="submit" class="btn btn-primary">Save</button>
+    <a href="{% url 'django_app.home:home' %}" class="btn btn-secondary ml-2">Cancel</a>
+  </div>
+
+</form>
+{% endblock %}
