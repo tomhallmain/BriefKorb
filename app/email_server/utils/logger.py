@@ -4,6 +4,7 @@ from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 import platform
 import glob
+import time
 
 def get_log_directory():
     """Get the appropriate log directory based on the operating system."""
@@ -22,6 +23,54 @@ def get_log_directory():
     # Create directory if it doesn't exist
     log_dir.mkdir(parents=True, exist_ok=True)
     return log_dir
+
+class WindowsCompatibleTimedRotatingFileHandler(TimedRotatingFileHandler):
+    """A TimedRotatingFileHandler that works on Windows by closing the file before rotation."""
+    
+    def emit(self, record):
+        """Override emit to handle rotation errors gracefully."""
+        try:
+            super().emit(record)
+        except (PermissionError, OSError) as e:
+            # If rotation fails due to file locking, try to handle it gracefully
+            # This can happen if another process has the file open
+            self.handleError(record)
+            # Try to reopen the stream if it was closed
+            if self.stream is None or self.stream.closed:
+                try:
+                    self.stream = self._open()
+                except Exception:
+                    pass
+    
+    def doRollover(self):
+        """Override doRollover to close the file before rotating on Windows."""
+        if self.stream:
+            self.stream.close()
+            self.stream = None
+        
+        # Try to rotate with retries for Windows file locking issues
+        max_retries = 3
+        retry_delay = 0.1
+        
+        for attempt in range(max_retries):
+            try:
+                super().doRollover()
+                break
+            except (PermissionError, OSError) as e:
+                if attempt < max_retries - 1:
+                    # Wait a bit and try again
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    # Last attempt failed, log the error but don't crash
+                    # We'll try to reopen the stream for continued logging
+                    try:
+                        self.stream = self._open()
+                    except Exception:
+                        pass
+                    # Don't raise - just log to stderr as a fallback
+                    import sys
+                    print(f"Warning: Could not rotate log file {self.baseFilename}: {e}", file=sys.stderr)
 
 def cleanup_old_logs(log_dir, log_file):
     """Clean up old log files, keeping only the 3 most recent ones.
@@ -74,7 +123,8 @@ def setup_logger(name, log_file='email_server.log'):
     cleanup_old_logs(log_dir, log_file)
     
     # Rotate logs daily and keep 3 days of history
-    file_handler = TimedRotatingFileHandler(
+    # Use Windows-compatible handler to avoid file locking issues
+    file_handler = WindowsCompatibleTimedRotatingFileHandler(
         log_path,
         when='midnight',  # Rotate at midnight
         interval=1,       # Every day
