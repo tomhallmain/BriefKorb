@@ -5,6 +5,8 @@ URL patterns for OAuth callbacks and authentication
 from django.urls import path
 from . import views
 
+app_name = 'django_app.oauth'
+
 urlpatterns = [
     # OAuth callbacks
     path('auth/microsoft/callback', views.microsoft_callback, name='microsoft_callback'),

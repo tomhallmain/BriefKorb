@@ -13,11 +13,6 @@ from email_server.config import EmailServerConfig, ProviderConfig
 from email_server.auth import TokenManager
 from email_client.utils.scope_checker import ScopeChecker
 
-# offline_access is a protocol-level scope (not a Graph permission) that is
-# required for MSAL to return a refresh token.  It is always included in the
-# saved Microsoft scopes regardless of the checkboxes.
-_MS_OFFLINE_SCOPE = 'offline_access'
-
 LOG_LEVELS = ['DEBUG', 'INFO', 'WARNING', 'ERROR']
 
 
@@ -68,9 +63,6 @@ def settings_view(request):
 
             # --- Microsoft ---
             ms_scopes = post.getlist('ms_scopes')
-            # Always ensure offline_access is present
-            if _MS_OFFLINE_SCOPE not in ms_scopes:
-                ms_scopes.append(_MS_OFFLINE_SCOPE)
 
             config.microsoft = ProviderConfig(
                 enabled='ms_enabled' in post,

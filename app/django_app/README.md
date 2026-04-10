@@ -53,7 +53,7 @@ The web app supports two authentication methods, both of which route through the
 
 Both methods use the same `TokenManager` for token storage, so tokens are shared between desktop and web.
 
-> **Note for Microsoft**: The `offline_access` scope must be included in `config.yaml` for MSAL to receive a refresh token. Without it, silent token refresh will fail and users will need to re-authenticate every hour.
+> **Note for Microsoft**: Do not add `offline_access` to `config.yaml` — it is a reserved MSAL scope. MSAL automatically requests refresh tokens internally.
 
 ## Running
 

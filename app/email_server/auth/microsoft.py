@@ -28,7 +28,6 @@ class MicrosoftOAuth(OAuthProvider):
         self.scopes = scopes or [
             "https://graph.microsoft.com/Mail.Read",
             "https://graph.microsoft.com/Mail.Send",
-            "offline_access"
         ]
         
         # Microsoft Graph API endpoints

@@ -30,7 +30,6 @@ A clean implementation of calendar and event management functionality, ported fr
 
 The calendar functionality requires Microsoft Graph API scopes:
 - `https://graph.microsoft.com/Calendars.ReadWrite` - Read and write calendar events
-- `offline_access` - Refresh tokens for persistent access
 
 Add these to your `email_server/config.yaml`:
 
@@ -40,7 +39,6 @@ microsoft:
     - "https://graph.microsoft.com/Mail.Read"
     - "https://graph.microsoft.com/Mail.Send"
     - "https://graph.microsoft.com/Calendars.ReadWrite"
-    - "offline_access"
 ```
 
 ## Usage

@@ -1,9 +1,9 @@
 """
-OAuth callback views for BriefKorb
+OAuth views for BriefKorb
 
-These views handle OAuth callbacks from Microsoft and Gmail providers,
-exchange authorization codes for tokens, and save them using the email_server system.
-Also provides web-based sign-in/sign-out functionality.
+Handles OAuth callbacks (microsoft_callback, gmail_callback) and the sign-in/sign-out
+endpoints (sign_in_microsoft, sign_in_gmail, sign_out) used by both the web UI and
+the desktop app.
 """
 
 from django.http import HttpResponse, HttpResponseRedirect
@@ -99,7 +99,7 @@ def microsoft_callback(request):
 
         # Use flow from session if available (web sign-in), otherwise use the simpler code exchange
         if flow:
-            result = auth_app.acquire_token_by_auth_code_flow(flow, {'code': code})
+            result = auth_app.acquire_token_by_auth_code_flow(flow, request.GET.dict())
         else:
             # Desktop app path: no MSAL flow was stored, fall back to direct code exchange
             result = auth_app.acquire_token_by_authorization_code(
@@ -111,9 +111,17 @@ def microsoft_callback(request):
         if "error" in result:
             return _error_response("Authentication Failed", f"Error: {result.get('error_description', result.get('error'))}")
 
-        # Get user info
-        user = microsoft_oauth.get_user_info(result.get('access_token'))
-        user_email = user.get('email') or user.get('userPrincipalName') or 'microsoft_user'
+        # Extract user info from id_token claims (no extra API call required)
+        claims = result.get('id_token_claims', {})
+        user_email = (claims.get('preferred_username')
+                      or claims.get('email')
+                      or claims.get('upn')
+                      or 'microsoft_user')
+        user = {
+            'email': user_email,
+            'userPrincipalName': user_email,
+            'displayName': claims.get('name', user_email),
+        }
 
         # Build token data, including the MSAL cache so silent refresh works later
         token_data = {
@@ -313,6 +321,8 @@ def sign_in_microsoft(request):
             return _error_response("Configuration Error", "Configuration file not found. Please configure BriefKorb first.")
 
         config = EmailServerConfig.from_file(str(config_path))
+        print(f"DEBUG authority: https://login.microsoftonline.com/{config.microsoft.tenant_id}")
+        print(f"DEBUG client_id: {config.microsoft.client_id}")
 
         if not config.microsoft.enabled:
             return _error_response("Configuration Error", "Microsoft Graph is not configured. Please configure it in BriefKorb settings.")

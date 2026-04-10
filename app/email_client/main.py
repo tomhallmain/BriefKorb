@@ -36,8 +36,6 @@ class DjangoServerThread(threading.Thread):
             # Use --noreload to avoid file watching issues
             self.process = subprocess.Popen(
                 [sys.executable, 'manage.py', 'runserver', '127.0.0.1:8000', '--noreload'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
                 text=True
             )
             
