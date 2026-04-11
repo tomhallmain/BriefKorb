@@ -27,7 +27,7 @@ class MicrosoftOAuth(OAuthProvider):
         
         # Default scopes if not provided
         self.scopes = scopes or [
-            "https://graph.microsoft.com/Mail.Read",
+            "https://graph.microsoft.com/Mail.ReadWrite",
             "https://graph.microsoft.com/Mail.Send",
         ]
         

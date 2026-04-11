@@ -9,7 +9,7 @@ microsoft:
   tenant_id: "your_tenant_id"
   redirect_uri: "http://localhost:8000/auth/microsoft/callback"
   scopes:
-    - "https://graph.microsoft.com/Mail.Read"
+    - "https://graph.microsoft.com/Mail.ReadWrite"
     - "https://graph.microsoft.com/Mail.Send"
     - "https://graph.microsoft.com/Calendars.ReadWrite"
   additional_settings:

@@ -65,11 +65,6 @@ class ScopeChecker:
         if provider.lower() == 'microsoft':
             return [
                 {
-                    'value': ScopeChecker.MS_READ,
-                    'label': 'Mail.Read - Read mail',
-                    'permissions': ['read']
-                },
-                {
                     'value': ScopeChecker.MS_SEND,
                     'label': 'Mail.Send - Send mail',
                     'permissions': ['send']

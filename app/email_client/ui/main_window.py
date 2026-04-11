@@ -613,6 +613,13 @@ class MainWindow(QMainWindow):
             self.current_message_index += 1
             self._display_current_message()
     
+    def _get_auth_provider_for_message(self, message):
+        """Return the AuthenticatedProvider that owns the given message"""
+        if not self.server:
+            return None
+        providers = self.server.get_authenticated_providers(message.provider)
+        return providers[0] if providers else None
+
     def _mark_as_read(self):
         """Mark selected message as read"""
         if not hasattr(self, 'current_selected_message'):

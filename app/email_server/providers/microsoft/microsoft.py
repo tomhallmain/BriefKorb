@@ -254,7 +254,9 @@ class MicrosoftGraphProvider(EmailProvider):
                 
                 response = self._retry_request(make_request)
                 if response is None or response.status_code >= 400:
-                    logger.warning(f"Failed to mark message {message_id} as read after retries")
+                    status = response.status_code if response is not None else 'None'
+                    body = response.text[:500] if response is not None else ''
+                    logger.warning(f"Failed to mark message {message_id} as read: HTTP {status} — {body}")
                     return False
                 return True
             

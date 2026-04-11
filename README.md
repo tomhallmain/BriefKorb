@@ -131,9 +131,8 @@ You'll need to set up API credentials for both Microsoft Graph API and Gmail API
 3. Create a client secret under Certificates & secrets
 4. Note the Application (client) ID, client secret value, and your Directory (tenant) ID
 5. Under API permissions, add the following Microsoft Graph delegated permissions:
-   - `Mail.Read`
+   - `Mail.ReadWrite`
    - `Mail.Send`
-   - `offline_access` (required for token refresh — without this users must re-authenticate every hour)
 6. Fill in `client_id`, `client_secret`, `tenant_id`, and `redirect_uri` in `config.yaml`
 
 ### Gmail API

@@ -116,7 +116,7 @@ def create_default_config(config_path: str) -> EmailServerConfig:
         microsoft=ProviderConfig(
             enabled=True,
             redirect_uri="http://localhost:8000/auth/microsoft/callback",
-            scopes=["https://graph.microsoft.com/Mail.Read", 
+            scopes=["https://graph.microsoft.com/Mail.ReadWrite",
                    "https://graph.microsoft.com/Mail.Send"]
         ),
         gmail=ProviderConfig(

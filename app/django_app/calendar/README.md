@@ -36,7 +36,7 @@ Add these to your `email_server/config.yaml`:
 ```yaml
 microsoft:
   scopes:
-    - "https://graph.microsoft.com/Mail.Read"
+    - "https://graph.microsoft.com/Mail.ReadWrite"
     - "https://graph.microsoft.com/Mail.Send"
     - "https://graph.microsoft.com/Calendars.ReadWrite"
 ```
