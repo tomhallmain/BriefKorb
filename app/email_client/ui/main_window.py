@@ -195,7 +195,12 @@ class MainWindow(QMainWindow):
         self.mark_read_btn.clicked.connect(self._mark_as_read)
         self.mark_read_btn.setEnabled(False)
         header_layout.addWidget(self.mark_read_btn)
-        
+
+        self.mark_all_read_btn = QPushButton("Mark All as Read")
+        self.mark_all_read_btn.clicked.connect(self._mark_group_as_read)
+        self.mark_all_read_btn.setEnabled(False)
+        header_layout.addWidget(self.mark_all_read_btn)
+
         self.delete_btn = QPushButton("Delete")
         self.delete_btn.clicked.connect(self._delete_message)
         self.delete_btn.setEnabled(False)
@@ -557,6 +562,7 @@ class MainWindow(QMainWindow):
         
         # Enable action buttons (check permissions)
         self.mark_read_btn.setEnabled(True)
+        self.mark_all_read_btn.setEnabled(True)
         
         # Check delete permission for this message's provider
         if self.config:
@@ -654,6 +660,51 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to mark message as read: {str(e)}")
     
+    def _mark_group_as_read(self):
+        """Mark all messages in the current group as read"""
+        if self.current_group_index is None or not self.server:
+            return
+
+        group = self.current_groups[self.current_group_index]
+        unread = [m for m in group.messages if not m.is_read]
+        if not unread:
+            self.statusBar.showMessage("All messages in this group are already read")
+            return
+
+        # Group unread messages by provider so we make one API call per provider
+        by_provider: dict = {}
+        for message in unread:
+            key = message.provider
+            by_provider.setdefault(key, []).append(message)
+
+        failed = 0
+        for provider_name, messages in by_provider.items():
+            auth_prov = self._get_auth_provider_for_message(messages[0])
+            if not auth_prov:
+                failed += len(messages)
+                continue
+            try:
+                success = self.server.mark_messages_as_read(
+                    user_id=auth_prov.user_id,
+                    provider_name=provider_name,
+                    message_ids=[m.id for m in messages]
+                )
+                if success:
+                    for m in messages:
+                        m.is_read = True
+                else:
+                    failed += len(messages)
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to mark messages as read: {str(e)}")
+                return
+
+        self._update_message_list()
+        self._display_current_message()
+        if failed:
+            self.statusBar.showMessage(f"Marked {len(unread) - failed}/{len(unread)} messages as read")
+        else:
+            self.statusBar.showMessage(f"Marked {len(unread)} message(s) as read")
+
     def _delete_message(self):
         """Delete selected message"""
         if not hasattr(self, 'current_selected_message'):
@@ -717,6 +768,7 @@ class MainWindow(QMainWindow):
                     self.prev_msg_btn.setEnabled(False)
                     self.next_msg_btn.setEnabled(False)
                     self.mark_read_btn.setEnabled(False)
+                    self.mark_all_read_btn.setEnabled(False)
                     self.delete_btn.setEnabled(False)
                 
                 self.statusBar.showMessage("Message deleted")
