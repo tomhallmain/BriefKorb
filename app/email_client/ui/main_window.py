@@ -29,6 +29,7 @@ from email_client.utils.message_grouping import MessageGroup, group_messages_by_
 from email_client.utils.content_type import ContentType
 from email_client.utils.workers import EmailWorkerThread
 from email_client.utils.html_utils import sanitize_html, convert_plain_text_to_html, is_html_content
+from email_client.utils.blocklist import BlocklistManager
 
 
 class MainWindow(QMainWindow):
@@ -44,6 +45,7 @@ class MainWindow(QMainWindow):
         self.worker_thread: Optional[EmailWorkerThread] = None
         self.config: Optional[EmailServerConfig] = None
         self.config_path: Optional[str] = None
+        self.blocklist: Optional[BlocklistManager] = None
         
         self._init_ui()
         self._load_config()
@@ -190,7 +192,7 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.subject_label)
         header_layout.addStretch()
         
-        # Action buttons
+        # Action buttons — ordered left to right by impact severity
         self.mark_read_btn = QPushButton("Mark as Read")
         self.mark_read_btn.clicked.connect(self._mark_as_read)
         self.mark_read_btn.setEnabled(False)
@@ -205,6 +207,16 @@ class MainWindow(QMainWindow):
         self.delete_btn.clicked.connect(self._delete_message)
         self.delete_btn.setEnabled(False)
         header_layout.addWidget(self.delete_btn)
+
+        self.delete_all_btn = QPushButton("Delete All")
+        self.delete_all_btn.clicked.connect(self._delete_group)
+        self.delete_all_btn.setEnabled(False)
+        header_layout.addWidget(self.delete_all_btn)
+
+        self.block_btn = QPushButton("Block")
+        self.block_btn.clicked.connect(self._block_sender)
+        self.block_btn.setEnabled(False)
+        header_layout.addWidget(self.block_btn)
         
         layout.addLayout(header_layout)
         
@@ -276,6 +288,7 @@ class MainWindow(QMainWindow):
             
             self.config = EmailServerConfig.from_file(str(config_path))
             self.server = UnifiedEmailServer(config=self.config)
+            self.blocklist = BlocklistManager(self.config.token_storage_path)
             self._update_ui_permissions()
             self._update_auth_status()
             self.statusBar.showMessage("Configuration loaded successfully")
@@ -437,6 +450,10 @@ class MainWindow(QMainWindow):
     
     def _on_messages_loaded(self, messages: List[EmailMessage]):
         """Handle messages loaded from worker thread"""
+        # Filter out messages from blocked senders
+        if self.blocklist:
+            from email_client.utils.message_grouping import extract_sender_email
+            messages = [m for m in messages if not self.blocklist.is_blocked(extract_sender_email(m.sender))]
         self.current_messages = messages
         # Group messages by sender
         self.current_groups = group_messages_by_sender(messages)
@@ -563,6 +580,8 @@ class MainWindow(QMainWindow):
         # Enable action buttons (check permissions)
         self.mark_read_btn.setEnabled(True)
         self.mark_all_read_btn.setEnabled(True)
+        self.delete_all_btn.setEnabled(True)
+        self.block_btn.setEnabled(True)
         
         # Check delete permission for this message's provider
         if self.config:
@@ -705,6 +724,100 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar.showMessage(f"Marked {len(unread)} message(s) as read")
 
+    def _do_delete_group(self, group: MessageGroup) -> bool:
+        """Delete all messages in a group without prompting. Returns True on full success."""
+        if not self.server:
+            return False
+
+        by_provider: dict = {}
+        for message in group.messages:
+            by_provider.setdefault(message.provider, []).append(message)
+
+        all_succeeded = True
+        for provider_name, messages in by_provider.items():
+            auth_prov = self._get_auth_provider_for_message(messages[0])
+            if not auth_prov:
+                all_succeeded = False
+                continue
+            try:
+                success = self.server.delete_user_messages(
+                    user_id=auth_prov.user_id,
+                    provider_name=provider_name,
+                    message_ids=[m.id for m in messages]
+                )
+                if success:
+                    deleted_ids = {m.id for m in messages}
+                    self.current_messages = [m for m in self.current_messages if m.id not in deleted_ids]
+                else:
+                    all_succeeded = False
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to delete messages: {str(e)}")
+                return False
+
+        if self.current_group_index is not None and self.current_groups[self.current_group_index] is group:
+            self.current_groups.pop(self.current_group_index)
+            self.current_group_index = None
+            self.current_message_index = 0
+
+        self._update_message_list()
+        self.message_body.clear()
+        self.subject_label.setText("Select a message group to view")
+        self.metadata_label.clear()
+        self.message_nav_label.setText("No messages")
+        self.prev_msg_btn.setEnabled(False)
+        self.next_msg_btn.setEnabled(False)
+        self.mark_read_btn.setEnabled(False)
+        self.mark_all_read_btn.setEnabled(False)
+        self.delete_all_btn.setEnabled(False)
+        self.block_btn.setEnabled(False)
+        self.delete_btn.setEnabled(False)
+        return all_succeeded
+
+    def _delete_group(self):
+        """Delete all messages in the current group"""
+        if self.current_group_index is None or not self.server:
+            return
+
+        group = self.current_groups[self.current_group_index]
+        reply = QMessageBox.question(
+            self,
+            "Delete All",
+            f"Delete all {group.count} message(s) from {group.sender_email}?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        if self._do_delete_group(group):
+            self.statusBar.showMessage(f"Deleted all messages from {group.sender_email}")
+        else:
+            self.statusBar.showMessage(f"Some messages could not be deleted")
+
+    def _block_sender(self):
+        """Block the current group's sender and delete all their messages"""
+        if self.current_group_index is None:
+            return
+
+        group = self.current_groups[self.current_group_index]
+        sender = group.sender_email
+
+        if not self.blocklist:
+            QMessageBox.warning(self, "Error", "Blocklist is not available.")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Block Sender",
+            f"Block {sender} and delete all their messages?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self.blocklist.block(sender)
+        self._do_delete_group(group)
+        self.statusBar.showMessage(f"Blocked {sender} and deleted their messages")
+
     def _delete_message(self):
         """Delete selected message"""
         if not hasattr(self, 'current_selected_message'):
@@ -769,6 +882,8 @@ class MainWindow(QMainWindow):
                     self.next_msg_btn.setEnabled(False)
                     self.mark_read_btn.setEnabled(False)
                     self.mark_all_read_btn.setEnabled(False)
+                    self.delete_all_btn.setEnabled(False)
+                    self.block_btn.setEnabled(False)
                     self.delete_btn.setEnabled(False)
                 
                 self.statusBar.showMessage("Message deleted")
