@@ -8,15 +8,31 @@ import base64
 from typing import Optional
 
 
+def _rgb_to_hex(match: re.Match) -> str:
+    """Convert an rgb(r, g, b) match to #rrggbb hex notation."""
+    r, g, b = int(match.group(1)), int(match.group(2)), int(match.group(3))
+    return f'#{r:02x}{g:02x}{b:02x}'
+
+
 def sanitize_html(html_content: str) -> str:
     """Sanitize HTML content to fix font size issues and enable image loading
-    
+
     Args:
         html_content: Raw HTML content from email
-        
+
     Returns:
         Sanitized HTML with fixed font sizes and processed images
     """
+    # Convert rgb(r, g, b) color values to hex — Qt's QTextHtmlParser only
+    # understands named colors and #rrggbb hex; rgb() causes "Unknown color" warnings
+    # and the colour is silently dropped.
+    html_content = re.sub(
+        r'rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)',
+        _rgb_to_hex,
+        html_content,
+        flags=re.IGNORECASE,
+    )
+
     # Fix invalid font sizes (0 or negative pixel sizes)
     # Replace font-size: 0, font-size:0px, font-size:0pt, etc.
     html_content = re.sub(
