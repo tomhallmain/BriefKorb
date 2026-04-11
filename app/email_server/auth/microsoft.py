@@ -6,6 +6,7 @@ from typing import Dict, Any, Optional, List
 import requests
 import msal
 import json
+import time
 from . import OAuthProvider, TokenManager, MicrosoftToken
 from ..utils.logger import setup_logger
 
@@ -248,7 +249,17 @@ class MicrosoftOAuth(OAuthProvider):
             # Verify this token belongs to Microsoft provider
             if not MicrosoftToken.verify_for_provider_type(token_data):
                 return None
-            
+
+            # If the stored token is still fresh, return it directly without calling
+            # acquire_token_silent — which can overwrite a valid v1 compact token with
+            # a JWT that has the wrong audience for Graph API.
+            acquired_at = token_data.get('acquired_at', 0)
+            expires_in = token_data.get('expires_in', 3600)
+            if acquired_at and time.time() < acquired_at + expires_in - 300:
+                if token_data.get('access_token'):
+                    logger.info(f"Using fresh stored token for {user_id} (expires in {int(acquired_at + expires_in - time.time())}s)")
+                    return token_data
+
             # Try to load MSAL cache
             cache = self._load_token_cache(user_id)
             auth_app = self._get_msal_app(cache)
@@ -262,32 +273,36 @@ class MicrosoftOAuth(OAuthProvider):
                     scopes=self.scopes,
                     account=accounts[0]
                 )
-                
-                if "error" not in result:
+                silent_token = result.get('access_token') if result else None
+                logger.info(f"acquire_token_silent for {user_id}: result={'error' if result and 'error' in result else ('token' if silent_token else 'None')}, prefix={silent_token[:20] if silent_token else None}")
+
+                if result is not None and "error" not in result and silent_token:
                     # Save updated cache
                     self._save_token_cache(user_id, cache)
-                    
+
                     # Store token data in our format for compatibility
+                    existing_msal_cache = token_data.get('msal_cache')
                     token_data = {
-                        'access_token': result.get('access_token'),
+                        'access_token': silent_token,
                         'refresh_token': result.get('refresh_token'),
                         'expires_in': result.get('expires_in', 3600),
                         'token_type': result.get('token_type', 'Bearer'),
                         'scope': result.get('scope'),
                         'id_token': result.get('id_token'),
-                        'msal_cache': cache.serialize() if cache.has_state_changed else None
+                        'msal_cache': cache.serialize() if cache.has_state_changed else existing_msal_cache,
+                        'acquired_at': time.time(),
                     }
                     # Remove None values
                     token_data = {k: v for k, v in token_data.items() if v is not None}
                     self.token_manager.store_token(user_id, token_data)
-                    
+
                     logger.debug(f"Successfully acquired token silently for user {user_id}")
                     return token_data
                 else:
-                    error_msg = result.get("error_description", result.get("error", "Unknown error"))
-                    logger.debug(f"Failed to acquire token silently for user {user_id}: {error_msg}")
+                    if result and 'error' in result:
+                        logger.info(f"acquire_token_silent error for {user_id}: {result.get('error_description', result.get('error'))}")
             else:
-                logger.debug(f"No accounts found in cache for user {user_id}")
+                logger.info(f"No MSAL accounts in cache for {user_id}, using stored token")
             
             # Fallback: try to use stored token if it has access_token
             if token_data and token_data.get('access_token'):

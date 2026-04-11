@@ -12,6 +12,7 @@ from django.urls import reverse
 from pathlib import Path
 from datetime import datetime
 import json
+import time
 import traceback
 
 # Add parent directory to path for imports
@@ -124,12 +125,17 @@ def microsoft_callback(request):
         }
 
         # Build token data, including the MSAL cache so silent refresh works later
+        granted_scopes = result.get('scope', [])
+        print(f"DEBUG token keys: {list(result.keys())}")
+        print(f"DEBUG access_token present: {bool(result.get('access_token'))}")
+        print(f"DEBUG granted scopes: {granted_scopes}")
         token_data = {
             'access_token': result.get('access_token'),
             'refresh_token': result.get('refresh_token'),
             'expires_in': result.get('expires_in', 3600),
             'token_type': result.get('token_type', 'Bearer'),
-            'scope': ' '.join(result.get('scope', [])),
+            'scope': ' '.join(granted_scopes) if isinstance(granted_scopes, list) else granted_scopes,
+            'acquired_at': time.time(),
         }
         if cache.has_state_changed:
             token_data['msal_cache'] = cache.serialize()
