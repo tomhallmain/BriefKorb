@@ -126,9 +126,6 @@ def microsoft_callback(request):
 
         # Build token data, including the MSAL cache so silent refresh works later
         granted_scopes = result.get('scope', [])
-        print(f"DEBUG token keys: {list(result.keys())}")
-        print(f"DEBUG access_token present: {bool(result.get('access_token'))}")
-        print(f"DEBUG granted scopes: {granted_scopes}")
         token_data = {
             'access_token': result.get('access_token'),
             'refresh_token': result.get('refresh_token'),
@@ -327,8 +324,6 @@ def sign_in_microsoft(request):
             return _error_response("Configuration Error", "Configuration file not found. Please configure BriefKorb first.")
 
         config = EmailServerConfig.from_file(str(config_path))
-        print(f"DEBUG authority: https://login.microsoftonline.com/{config.microsoft.tenant_id}")
-        print(f"DEBUG client_id: {config.microsoft.client_id}")
 
         if not config.microsoft.enabled:
             return _error_response("Configuration Error", "Microsoft Graph is not configured. Please configure it in BriefKorb settings.")

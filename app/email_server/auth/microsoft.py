@@ -257,7 +257,7 @@ class MicrosoftOAuth(OAuthProvider):
             expires_in = token_data.get('expires_in', 3600)
             if acquired_at and time.time() < acquired_at + expires_in - 300:
                 if token_data.get('access_token'):
-                    logger.info(f"Using fresh stored token for {user_id} (expires in {int(acquired_at + expires_in - time.time())}s)")
+                    logger.debug(f"Using fresh stored token for {user_id} (expires in {int(acquired_at + expires_in - time.time())}s)")
                     return token_data
 
             # Try to load MSAL cache
@@ -274,7 +274,6 @@ class MicrosoftOAuth(OAuthProvider):
                     account=accounts[0]
                 )
                 silent_token = result.get('access_token') if result else None
-                logger.info(f"acquire_token_silent for {user_id}: result={'error' if result and 'error' in result else ('token' if silent_token else 'None')}, prefix={silent_token[:20] if silent_token else None}")
 
                 if result is not None and "error" not in result and silent_token:
                     # Save updated cache
@@ -300,9 +299,9 @@ class MicrosoftOAuth(OAuthProvider):
                     return token_data
                 else:
                     if result and 'error' in result:
-                        logger.info(f"acquire_token_silent error for {user_id}: {result.get('error_description', result.get('error'))}")
+                        logger.warning(f"acquire_token_silent error for {user_id}: {result.get('error_description', result.get('error'))}")
             else:
-                logger.info(f"No MSAL accounts in cache for {user_id}, using stored token")
+                logger.debug(f"No MSAL accounts in cache for {user_id}, using stored token")
             
             # Fallback: try to use stored token if it has access_token
             if token_data and token_data.get('access_token'):

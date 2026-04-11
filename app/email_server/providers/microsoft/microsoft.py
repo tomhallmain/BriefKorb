@@ -74,7 +74,6 @@ class MicrosoftGraphProvider(EmailProvider):
         if not access_token:
             logger.error(f"No access token in token data for user {user_id}")
             raise RuntimeError("Invalid token data")
-        logger.info(f"Using access token for {user_id}: present={bool(access_token)}, prefix={access_token[:10] if access_token else None}")
         return {
             'Authorization': f"Bearer {access_token}",
             'Content-Type': 'application/json'
