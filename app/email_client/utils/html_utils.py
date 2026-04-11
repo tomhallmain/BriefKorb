@@ -9,7 +9,14 @@ from typing import Optional
 
 
 def _rgb_to_hex(match: re.Match) -> str:
-    """Convert an rgb(r, g, b) match to #rrggbb hex notation."""
+    """Convert an rgb(r, g, b) or rgba(r, g, b, a) match to #rrggbb hex.
+
+    Qt's QTextHtmlParser/QCssParser only understands named colours and #rrggbb
+    hex — functional rgb/rgba syntax produces "Unknown color" or
+    "Specified color without alpha value but alpha given" warnings and the
+    colour is silently dropped.  Alpha is discarded because Qt has no way to
+    honour it in this context.
+    """
     r, g, b = int(match.group(1)), int(match.group(2)), int(match.group(3))
     return f'#{r:02x}{g:02x}{b:02x}'
 
@@ -23,11 +30,30 @@ def sanitize_html(html_content: str) -> str:
     Returns:
         Sanitized HTML with fixed font sizes and processed images
     """
-    # Convert rgb(r, g, b) color values to hex — Qt's QTextHtmlParser only
-    # understands named colors and #rrggbb hex; rgb() causes "Unknown color" warnings
-    # and the colour is silently dropped.
+    # Convert rgb(...) and rgba(...) color values to #rrggbb hex.
+    # Qt's QTextHtmlParser understands only named colours and #rrggbb hex;
+    # rgb() produces "Unknown color name" warnings and rgba() produces
+    # "Specified color without alpha value but alpha given" warnings — in both
+    # cases the colour is silently dropped.  Match rgba first so the 'a'
+    # variant is consumed before the plain rgb pattern can partially match it.
+    # rgba(...) — parenthesised form with alpha channel.
+    html_content = re.sub(
+        r'rgba\(\s*(\d{1,3})%?\s*,\s*(\d{1,3})%?\s*,\s*(\d{1,3})%?\s*,[^)]*\)',
+        _rgb_to_hex,
+        html_content,
+        flags=re.IGNORECASE,
+    )
+    # rgb(...) — parenthesised form without alpha.
     html_content = re.sub(
         r'rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)',
+        _rgb_to_hex,
+        html_content,
+        flags=re.IGNORECASE,
+    )
+    # rgb r,g,b[,a] — no-parentheses space-separated form emitted by some
+    # email clients.  Qt logs these as 'rgb r,g,b,a' and rejects the alpha.
+    html_content = re.sub(
+        r'rgb\s+(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,\s*[\d.]+)?',
         _rgb_to_hex,
         html_content,
         flags=re.IGNORECASE,

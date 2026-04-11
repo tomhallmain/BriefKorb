@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QMessageBox, QStatusBar, QProgressBar, QGroupBox,
     QSizePolicy
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QFont, QTextDocument
 
 # Add parent directories to path
@@ -32,6 +32,23 @@ from email_client.utils.html_utils import sanitize_html, convert_plain_text_to_h
 from email_client.utils.blocklist import BlocklistManager
 
 
+class _BodyTextEdit(QTextEdit):
+    """QTextEdit that never lets document content influence the splitter.
+
+    Qt recomputes sizeHint() from document().idealWidth() after every
+    setHtml() call.  When that ideal width exceeds the current pane width the
+    splitter redistributes space — even with QSizePolicy.Ignored.  Returning a
+    fixed zero-size hint from both sizeHint() and minimumSizeHint() severs that
+    link entirely; the splitter can only be moved by the user.
+    """
+
+    def sizeHint(self):
+        return QSize(0, 0)
+
+    def minimumSizeHint(self):
+        return QSize(0, 0)
+
+
 class MainWindow(QMainWindow):
     """Main application window"""
     
@@ -47,10 +64,16 @@ class MainWindow(QMainWindow):
         self.config: Optional[EmailServerConfig] = None
         self.config_path: Optional[str] = None
         self.blocklist: Optional[BlocklistManager] = None
-        
+        # Desired splitter widths — updated only when the user drags the handle.
+        # Used to restore positions after content-driven layout passes.
+        self._splitter_sizes: List[int] = [400, 600]
+
         self._init_ui()
         self._load_config()
         self._update_auth_status()
+        # Defer post-init until the event loop is running and the window has
+        # its real geometry, so setSizes() lands on a fully-laid-out splitter.
+        QTimer.singleShot(0, self._post_init)
     
     def _init_ui(self):
         """Initialize the user interface"""
@@ -68,19 +91,19 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(toolbar)
         
         # Main content area with splitter
-        splitter = QSplitter(Qt.Horizontal)
-        
+        self.splitter = QSplitter(Qt.Horizontal)
+        # Prevent panes from collapsing to zero width
+        self.splitter.setChildrenCollapsible(False)
+
         # Left panel: Message list
         left_panel = self._create_message_list_panel()
-        splitter.addWidget(left_panel)
-        
+        self.splitter.addWidget(left_panel)
+
         # Right panel: Message detail
         right_panel = self._create_message_detail_panel()
-        splitter.addWidget(right_panel)
-        
-        # Set splitter proportions (40% list, 60% detail)
-        splitter.setSizes([400, 600])
-        main_layout.addWidget(splitter)
+        self.splitter.addWidget(right_panel)
+
+        main_layout.addWidget(self.splitter)
         
         # Status bar
         self.statusBar = QStatusBar()
@@ -155,6 +178,8 @@ class MainWindow(QMainWindow):
         # Message list
         self.message_list = QListWidget()
         self.message_list.itemClicked.connect(self._on_message_selected)
+        # Content (long sender names / subjects) must not drive the pane width.
+        self.message_list.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         layout.addWidget(self.message_list)
         
         # Status label
@@ -246,9 +271,11 @@ class MainWindow(QMainWindow):
         body_layout.addWidget(self.message_loading_label)
         
         # Message body
-        self.message_body = QTextEdit()
+        self.message_body = _BodyTextEdit()
         self.message_body.setReadOnly(True)
         self.message_body.setPlaceholderText("Message content will appear here")
+        self.message_body.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+        self.message_body.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         # Enable external resource loading for images
         # Set base URL to allow relative image paths
         self.message_body.document().setMetaInformation(
@@ -398,6 +425,30 @@ class MainWindow(QMainWindow):
             self.auth_status_label.setText(f"Error checking auth status: {str(e)}")
             self.auth_status_label.setStyleSheet("color: #ff4444; font-style: italic;")
     
+    def _post_init(self):
+        """Run once after the event loop starts and the window has real geometry.
+
+        setSizes() called during __init__ / _init_ui() is applied before Qt
+        has computed the window's actual layout, so it gets overridden by the
+        first layout pass.  Calling it here — after the window is visible and
+        the event loop is running — gives us an authoritative baseline.
+
+        This is also the right place to trigger any startup work that should
+        happen after the UI is ready (e.g. auto-loading messages in the future).
+        """
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes(self._splitter_sizes)
+        self.splitter.splitterMoved.connect(self._on_splitter_moved)
+
+    def _on_splitter_moved(self, _pos: int, _index: int):
+        """Track the user's chosen splitter position.
+
+        splitterMoved is only emitted on user interaction, never on programmatic
+        setSizes() calls, so this always reflects the user's explicit intent.
+        """
+        self._splitter_sizes = self.splitter.sizes()
+
     def _on_provider_changed(self, provider: str):
         """Handle provider selection change"""
         self._update_ui_permissions()
@@ -618,6 +669,11 @@ class MainWindow(QMainWindow):
             self.message_body.setHtml(html)
         else:
             self.message_body.clear()
+        # setHtml() posts a QEvent::LayoutRequest that is processed
+        # asynchronously.  A singleShot(0) can fire before that event is
+        # drained, so use a short but non-zero delay to ensure the layout pass
+        # completes before we restore the splitter to the user's desired sizes.
+        QTimer.singleShot(50, lambda: self.splitter.setSizes(self._splitter_sizes))
 
     def _on_body_load_error(self, error: str):
         """Slot called when body processing fails in the worker thread."""
