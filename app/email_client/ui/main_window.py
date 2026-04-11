@@ -67,6 +67,8 @@ class MainWindow(QMainWindow):
         # Desired splitter widths — updated only when the user drags the handle.
         # Used to restore positions after content-driven layout passes.
         self._splitter_sizes: List[int] = [400, 600]
+        # Last HTML written to the message body; used by "Open in Browser".
+        self._current_html: Optional[str] = None
 
         self._init_ui()
         self._load_config()
@@ -243,7 +245,13 @@ class MainWindow(QMainWindow):
         self.block_btn.clicked.connect(self._block_sender)
         self.block_btn.setEnabled(False)
         header_layout.addWidget(self.block_btn)
-        
+
+        self.open_browser_btn = QPushButton("Open in Browser")
+        self.open_browser_btn.clicked.connect(self._open_in_browser)
+        self.open_browser_btn.setEnabled(False)
+        self.open_browser_btn.setToolTip("Write the processed HTML to a temp file and open it in the default browser")
+        header_layout.addWidget(self.open_browser_btn)
+
         layout.addLayout(header_layout)
         
         # Message metadata
@@ -649,6 +657,8 @@ class MainWindow(QMainWindow):
         # I/O (image downloads) and must not block the main thread.
         self.message_loading_label.setVisible(True)
         self.message_body.clear()
+        self._current_html = None
+        self.open_browser_btn.setEnabled(False)
 
         # Cancel any in-flight body load for a previously selected message
         if self.body_worker_thread and self.body_worker_thread.isRunning():
@@ -665,6 +675,8 @@ class MainWindow(QMainWindow):
     def _on_body_content_ready(self, html: str):
         """Slot called from MessageBodyWorkerThread when HTML is ready."""
         self.message_loading_label.setVisible(False)
+        self._current_html = html or None
+        self.open_browser_btn.setEnabled(bool(html))
         if html:
             self.message_body.setHtml(html)
         else:
@@ -679,7 +691,32 @@ class MainWindow(QMainWindow):
         """Slot called when body processing fails in the worker thread."""
         self.message_loading_label.setVisible(False)
         self.message_body.setPlainText(f"(Failed to load message content: {error})")
-    
+
+    def _open_in_browser(self):
+        """Write the current message's processed HTML to a temp file and open it."""
+        import tempfile
+        import webbrowser
+
+        if not self._current_html:
+            return
+
+        try:
+            # delete=False so the file survives after we close the handle;
+            # the OS will clean up the temp directory on its own schedule.
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".html",
+                prefix="briefkorb_msg_",
+                delete=False,
+                encoding="utf-8",
+            ) as f:
+                f.write(self._current_html)
+                path = f.name
+
+            webbrowser.open(f"file://{path}")
+        except Exception as e:
+            QMessageBox.warning(self, "Open in Browser", f"Could not open message in browser:\n{e}")
+
     def _previous_message(self):
         """Navigate to previous message in current group"""
         if self.current_group_index is None:
