@@ -43,9 +43,10 @@ def sanitize_html(html_content: str) -> str:
         html_content,
         flags=re.IGNORECASE,
     )
-    # rgb(...) — parenthesised form without alpha.
+    # rgb(...) — parenthesised form, with or without a (non-standard) fourth
+    # alpha value.  Some senders write rgb(0,0,0,.1) instead of rgba(0,0,0,.1).
     html_content = re.sub(
-        r'rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)',
+        r'rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,[^)]*)?\s*\)',
         _rgb_to_hex,
         html_content,
         flags=re.IGNORECASE,
@@ -216,6 +217,24 @@ def _process_images(html_content: str) -> str:
         return img_tag
     
     return re.sub(r'<img[^>]*>', process_image_tag, html_content, flags=re.IGNORECASE)
+
+
+def strip_images_for_debug(html_content: str) -> str:
+    """Return a copy of *html_content* with embedded image data removed.
+
+    Base64 data URIs can be megabytes long, making the HTML impractical to
+    read, copy, or diff.  This replaces every ``src="data:..."`` value with a
+    short placeholder so the surrounding markup — including any inline styles
+    and colour specifications — remains intact and inspectable.
+
+    External ``src`` URLs (http/https) are left untouched.
+    """
+    return re.sub(
+        r'src=["\']data:[^"\']*["\']',
+        'src="[image data stripped]"',
+        html_content,
+        flags=re.IGNORECASE,
+    )
 
 
 def convert_plain_text_to_html(text: str) -> str:

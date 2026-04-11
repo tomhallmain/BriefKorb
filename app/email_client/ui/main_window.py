@@ -28,7 +28,7 @@ from email_client.utils.scope_checker import ScopeChecker
 from email_client.utils.message_grouping import MessageGroup, group_messages_by_sender
 from email_client.utils.content_type import ContentType
 from email_client.utils.workers import EmailWorkerThread, MessageBodyWorkerThread
-from email_client.utils.html_utils import sanitize_html, convert_plain_text_to_html, is_html_content
+from email_client.utils.html_utils import sanitize_html, convert_plain_text_to_html, is_html_content, strip_images_for_debug
 from email_client.utils.blocklist import BlocklistManager
 
 
@@ -80,7 +80,7 @@ class MainWindow(QMainWindow):
     def _init_ui(self):
         """Initialize the user interface"""
         self.setWindowTitle("BriefKorb - Unified Email Client")
-        self.setGeometry(100, 100, 1200, 800)
+        self.setGeometry(100, 100, 1500, 800)
         
         # Create central widget
         central_widget = QWidget()
@@ -251,6 +251,12 @@ class MainWindow(QMainWindow):
         self.open_browser_btn.setEnabled(False)
         self.open_browser_btn.setToolTip("Write the processed HTML to a temp file and open it in the default browser")
         header_layout.addWidget(self.open_browser_btn)
+
+        self.save_debug_html_btn = QPushButton("Save Debug HTML")
+        self.save_debug_html_btn.clicked.connect(self._save_debug_html)
+        self.save_debug_html_btn.setEnabled(False)
+        self.save_debug_html_btn.setToolTip("Save processed HTML (images stripped) to the project root for inspection")
+        header_layout.addWidget(self.save_debug_html_btn)
 
         layout.addLayout(header_layout)
         
@@ -659,6 +665,7 @@ class MainWindow(QMainWindow):
         self.message_body.clear()
         self._current_html = None
         self.open_browser_btn.setEnabled(False)
+        self.save_debug_html_btn.setEnabled(False)
 
         # Cancel any in-flight body load for a previously selected message
         if self.body_worker_thread and self.body_worker_thread.isRunning():
@@ -677,6 +684,7 @@ class MainWindow(QMainWindow):
         self.message_loading_label.setVisible(False)
         self._current_html = html or None
         self.open_browser_btn.setEnabled(bool(html))
+        self.save_debug_html_btn.setEnabled(bool(html))
         if html:
             self.message_body.setHtml(html)
         else:
@@ -716,6 +724,20 @@ class MainWindow(QMainWindow):
             webbrowser.open(f"file://{path}")
         except Exception as e:
             QMessageBox.warning(self, "Open in Browser", f"Could not open message in browser:\n{e}")
+
+    def _save_debug_html(self):
+        """Save the current message's processed HTML (images stripped) to the project root."""
+        if not self._current_html:
+            return
+
+        try:
+            stripped = strip_images_for_debug(self._current_html)
+            project_root = Path(__file__).parent.parent.parent.parent
+            out_path = project_root / "debug_email.html"
+            out_path.write_text(stripped, encoding="utf-8")
+            self.statusBar.showMessage(f"Debug HTML saved to {out_path}")
+        except Exception as e:
+            QMessageBox.warning(self, "Save Debug HTML", f"Could not save debug HTML:\n{e}")
 
     def _previous_message(self):
         """Navigate to previous message in current group"""
