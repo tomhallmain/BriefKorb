@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from email_server import UnifiedEmailServer, EmailMessage
+from email_client.utils.html_utils import sanitize_html, convert_plain_text_to_html, is_html_content
 
 
 class EmailWorkerThread(QThread):
@@ -37,5 +38,34 @@ class EmailWorkerThread(QThread):
                 unread_only=self.unread_only
             )
             self.messages_loaded.emit(messages)
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+
+
+class MessageBodyWorkerThread(QThread):
+    """Worker thread for processing message body content off the main thread.
+
+    Sanitizing HTML (which may download remote images) can be slow; doing it
+    here keeps the UI responsive and lets action buttons become available as
+    soon as the message header is shown.
+    """
+    content_ready = Signal(str)   # emits processed HTML ready to pass to setHtml
+    error_occurred = Signal(str)
+
+    def __init__(self, message: EmailMessage):
+        super().__init__()
+        self.message = message
+
+    def run(self):
+        try:
+            body = self.message.body
+            if not body:
+                self.content_ready.emit("")
+                return
+            if is_html_content(body):
+                html = sanitize_html(body)
+            else:
+                html = convert_plain_text_to_html(body)
+            self.content_ready.emit(html)
         except Exception as e:
             self.error_occurred.emit(str(e))

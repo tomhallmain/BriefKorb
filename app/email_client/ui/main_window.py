@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QPushButton, QComboBox, QLabel, QListWidget, QListWidgetItem, QTextEdit,
     QLineEdit, QMessageBox, QStatusBar, QProgressBar, QGroupBox,
-    QSizePolicy, QApplication
+    QSizePolicy
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QTextDocument
@@ -27,7 +27,7 @@ from ui.auth_settings_dialog import AuthSettingsDialog
 from email_client.utils.scope_checker import ScopeChecker
 from email_client.utils.message_grouping import MessageGroup, group_messages_by_sender
 from email_client.utils.content_type import ContentType
-from email_client.utils.workers import EmailWorkerThread
+from email_client.utils.workers import EmailWorkerThread, MessageBodyWorkerThread
 from email_client.utils.html_utils import sanitize_html, convert_plain_text_to_html, is_html_content
 from email_client.utils.blocklist import BlocklistManager
 
@@ -43,6 +43,7 @@ class MainWindow(QMainWindow):
         self.current_group_index: Optional[int] = None
         self.current_message_index: int = 0
         self.worker_thread: Optional[EmailWorkerThread] = None
+        self.body_worker_thread: Optional[MessageBodyWorkerThread] = None
         self.config: Optional[EmailServerConfig] = None
         self.config_path: Optional[str] = None
         self.blocklist: Optional[BlocklistManager] = None
@@ -569,20 +570,13 @@ class MainWindow(QMainWindow):
         metadata += f"Group: {group.count} messages from {group.display_name}"
         self.metadata_label.setText(metadata)
         
-        # Show loading indicator before processing content (especially for images)
-        self.message_loading_label.setVisible(True)
-        self.message_body.clear()
-        # Process events to ensure loading label is painted before blocking operation
-        QApplication.processEvents()
-        # Process message body (this may take time if downloading images)
-        self._process_message_body(message)
-        
-        # Enable action buttons (check permissions)
+        # Enable action buttons immediately — the user can already judge what
+        # they want to do from the sender details shown above.
         self.mark_read_btn.setEnabled(True)
         self.mark_all_read_btn.setEnabled(True)
         self.delete_all_btn.setEnabled(True)
         self.block_btn.setEnabled(True)
-        
+
         # Check delete permission for this message's provider
         if self.config:
             provider_name = message.provider.lower()
@@ -597,26 +591,38 @@ class MainWindow(QMainWindow):
                 self.delete_btn.setToolTip("")
         else:
             self.delete_btn.setEnabled(True)
-        
+
         self.current_selected_message = message
-    
-    def _process_message_body(self, message: EmailMessage):
-        """Process and display message body content (called after showing loading indicator)"""
-        try:
-            if message.body:
-                if is_html_content(message.body):
-                    # It's HTML, sanitize and use setHtml (this may download images)
-                    sanitized_html = sanitize_html(message.body)
-                    self.message_body.setHtml(sanitized_html)
-                else:
-                    # It's plain text, convert to HTML for better display
-                    html_body = convert_plain_text_to_html(message.body)
-                    self.message_body.setHtml(html_body)
-            else:
-                self.message_body.clear()
-        finally:
-            # Hide loading indicator after processing
-            self.message_loading_label.setVisible(False)
+
+        # Load body content in background — sanitising HTML can involve network
+        # I/O (image downloads) and must not block the main thread.
+        self.message_loading_label.setVisible(True)
+        self.message_body.clear()
+
+        # Cancel any in-flight body load for a previously selected message
+        if self.body_worker_thread and self.body_worker_thread.isRunning():
+            self.body_worker_thread.content_ready.disconnect()
+            self.body_worker_thread.error_occurred.disconnect()
+            self.body_worker_thread.quit()
+            self.body_worker_thread.wait()
+
+        self.body_worker_thread = MessageBodyWorkerThread(message)
+        self.body_worker_thread.content_ready.connect(self._on_body_content_ready)
+        self.body_worker_thread.error_occurred.connect(self._on_body_load_error)
+        self.body_worker_thread.start()
+
+    def _on_body_content_ready(self, html: str):
+        """Slot called from MessageBodyWorkerThread when HTML is ready."""
+        self.message_loading_label.setVisible(False)
+        if html:
+            self.message_body.setHtml(html)
+        else:
+            self.message_body.clear()
+
+    def _on_body_load_error(self, error: str):
+        """Slot called when body processing fails in the worker thread."""
+        self.message_loading_label.setVisible(False)
+        self.message_body.setPlainText(f"(Failed to load message content: {error})")
     
     def _previous_message(self):
         """Navigate to previous message in current group"""
