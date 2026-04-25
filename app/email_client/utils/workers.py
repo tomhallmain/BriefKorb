@@ -24,7 +24,7 @@ class EmailWorkerThread(QThread):
         self.provider_name = provider_name  # None means load from all providers
         self.folder = 'inbox'
         self.unread_only = False
-        self.max_messages = 50
+        self.max_messages = 200
     
     def run(self):
         """Fetch messages in background thread"""
