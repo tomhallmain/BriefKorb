@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from email_server.config import EmailServerConfig
 from email_server.auth import MicrosoftOAuth, TokenManager
 from email_server.providers.microsoft.microsoft import MicrosoftGraphProvider
+from email_server.blocked_sender_tracking import BlockedSenderTracker, BlockEvent
 
 
 class MessagesService:
@@ -57,6 +58,7 @@ class MessagesService:
             redirect_uri=self.config.microsoft.redirect_uri,
             scopes=self.config.microsoft.scopes
         )
+        self.blocked_sender_tracker = BlockedSenderTracker(self.config.token_storage_path)
     
     def _get_headers(self, timezone: Optional[str] = None) -> Dict[str, str]:
         """Get request headers with authentication token"""
@@ -305,19 +307,35 @@ class MessagesService:
                 return False
             
             # Process blocking rules in parallel using ThreadPoolExecutor
+            successful_senders: List[str] = []
             with ThreadPoolExecutor(max_workers=min(10, len(sender_names))) as executor:
-                futures: List[Future[bool]] = [
-                    executor.submit(create_block_rule, sender_name)
+                sender_futures: List[tuple[str, Future[bool]]] = [
+                    (sender_name, executor.submit(create_block_rule, sender_name))
                     for sender_name in sender_names
                 ]
                 
                 # Wait for all operations to complete
-                wait(futures)
+                wait([future for _, future in sender_futures])
                 
                 # Check results
-                for future in futures:
-                    if not future.result():
+                for sender_name, future in sender_futures:
+                    if future.result():
+                        successful_senders.append(sender_name)
+                    else:
                         failed_count += 1
+            
+            # Persist successful manual block actions for future auto-block models.
+            if successful_senders:
+                for sender_name in successful_senders:
+                    self.blocked_sender_tracker.record(
+                        BlockEvent(
+                            sender=sender_name,
+                            source='django_web_messages',
+                            sender_kind='display_name',
+                            provider='microsoft',
+                            mailbox='inbox',
+                        )
+                    )
             
             return failed_count == 0
         except Exception as e:

@@ -20,6 +20,7 @@ from PySide6.QtGui import QFont, QTextDocument
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from email_server import UnifiedEmailServer, EmailMessage, AuthenticatedProvider
 from email_server.config import EmailServerConfig
+from email_server.blocked_sender_tracking import BlockedSenderTracker, BlockEvent
 
 from widgets.message_list_item import MessageListItem
 from widgets.compose_dialog import ComposeDialog
@@ -64,6 +65,7 @@ class MainWindow(QMainWindow):
         self.config: Optional[EmailServerConfig] = None
         self.config_path: Optional[str] = None
         self.blocklist: Optional[BlocklistManager] = None
+        self.blocked_sender_tracker: Optional[BlockedSenderTracker] = None
         # Desired splitter widths — updated only when the user drags the handle.
         # Used to restore positions after content-driven layout passes.
         self._splitter_sizes: List[int] = [400, 600]
@@ -333,6 +335,7 @@ class MainWindow(QMainWindow):
             self.config = EmailServerConfig.from_file(str(config_path))
             self.server = UnifiedEmailServer(config=self.config)
             self.blocklist = BlocklistManager(self.config.token_storage_path)
+            self.blocked_sender_tracker = BlockedSenderTracker(self.config.token_storage_path)
             self._update_ui_permissions()
             self._update_auth_status()
             self.statusBar.showMessage("Configuration loaded successfully")
@@ -992,6 +995,16 @@ class MainWindow(QMainWindow):
             return
 
         self.blocklist.block(sender)
+        if self.blocked_sender_tracker:
+            self.blocked_sender_tracker.record(
+                BlockEvent(
+                    sender=sender,
+                    source="desktop_email_client",
+                    sender_kind="email",
+                    message_count=group.count,
+                    sender_domain=group.sender_domain,
+                )
+            )
         self._do_delete_group(group)
         self.statusBar.showMessage(f"Blocked {sender} and deleted their messages")
 
