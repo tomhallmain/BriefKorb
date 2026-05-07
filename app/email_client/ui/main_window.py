@@ -10,7 +10,7 @@ from datetime import datetime
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QPushButton, QComboBox, QLabel, QListWidget, QListWidgetItem, QTextEdit,
-    QLineEdit, QMessageBox, QStatusBar, QProgressBar, QGroupBox,
+    QLineEdit, QMessageBox, QStatusBar, QProgressBar, QGroupBox, QMenu,
     QSizePolicy
 )
 from PySide6.QtCore import Qt, QSize, QTimer
@@ -180,6 +180,8 @@ class MainWindow(QMainWindow):
         # Message list
         self.message_list = QListWidget()
         self.message_list.itemClicked.connect(self._on_message_selected)
+        self.message_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.message_list.customContextMenuRequested.connect(self._show_group_context_menu)
         # Content (long sender names / subjects) must not drive the pane width.
         self.message_list.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         layout.addWidget(self.message_list)
@@ -602,6 +604,36 @@ class MainWindow(QMainWindow):
         # Show first message in the group
         self.current_message_index = 0
         self._display_current_message()
+
+    def _show_group_context_menu(self, position):
+        """Show right-click actions for a message group without loading it."""
+        item = self.message_list.itemAt(position)
+        if item is None:
+            return
+
+        group = item.data(Qt.UserRole)
+        if not isinstance(group, MessageGroup):
+            return
+
+        menu = QMenu(self)
+        mark_read_action = menu.addAction("Mark Group as Read")
+        delete_action = menu.addAction("Delete Group")
+        block_action = menu.addAction("Block Sender and Delete Group")
+
+        selected_action = menu.exec(self.message_list.mapToGlobal(position))
+        if selected_action is mark_read_action:
+            self._mark_group_as_read_for_group(group)
+        elif selected_action is delete_action:
+            self._delete_group_for_group(group)
+        elif selected_action is block_action:
+            self._block_sender_for_group(group)
+
+    def _find_group_index(self, group: MessageGroup) -> Optional[int]:
+        """Find current group index by sender identity."""
+        for i, current_group in enumerate(self.current_groups):
+            if current_group.sender_email == group.sender_email:
+                return i
+        return None
     
     def _display_current_message(self):
         """Display the current message from the current group"""
@@ -806,9 +838,16 @@ class MainWindow(QMainWindow):
             return
 
         group = self.current_groups[self.current_group_index]
+        self._mark_group_as_read_for_group(group)
+
+    def _mark_group_as_read_for_group(self, group: MessageGroup):
+        """Mark all messages in the given group as read."""
+        if not self.server:
+            return
+
         unread = [m for m in group.messages if not m.is_read]
         if not unread:
-            self.statusBar.showMessage("All messages in this group are already read")
+            self.statusBar.showMessage(f"All messages in {group.sender_email} are already read")
             return
 
         # Group unread messages by provider so we make one API call per provider
@@ -839,7 +878,9 @@ class MainWindow(QMainWindow):
                 return
 
         self._update_message_list()
-        self._display_current_message()
+        selected_group_index = self._find_group_index(group)
+        if self.current_group_index is not None and selected_group_index == self.current_group_index:
+            self._display_current_message()
         if failed:
             self.statusBar.showMessage(f"Marked {len(unread) - failed}/{len(unread)} messages as read")
         else:
@@ -849,6 +890,12 @@ class MainWindow(QMainWindow):
         """Delete all messages in a group without prompting. Returns True on full success."""
         if not self.server:
             return False
+        selected_group = (
+            self.current_groups[self.current_group_index]
+            if self.current_group_index is not None and self.current_group_index < len(self.current_groups)
+            else None
+        )
+        was_selected_group = selected_group is group
 
         by_provider: dict = {}
         for message in group.messages:
@@ -875,23 +922,24 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Failed to delete messages: {str(e)}")
                 return False
 
-        if self.current_group_index is not None and self.current_groups[self.current_group_index] is group:
-            self.current_groups.pop(self.current_group_index)
+        self.current_groups = [g for g in self.current_groups if g is not group]
+        if was_selected_group:
             self.current_group_index = None
             self.current_message_index = 0
 
         self._update_message_list()
-        self.message_body.clear()
-        self.subject_label.setText("Select a message group to view")
-        self.metadata_label.clear()
-        self.message_nav_label.setText("No messages")
-        self.prev_msg_btn.setEnabled(False)
-        self.next_msg_btn.setEnabled(False)
-        self.mark_read_btn.setEnabled(False)
-        self.mark_all_read_btn.setEnabled(False)
-        self.delete_all_btn.setEnabled(False)
-        self.block_btn.setEnabled(False)
-        self.delete_btn.setEnabled(False)
+        if was_selected_group:
+            self.message_body.clear()
+            self.subject_label.setText("Select a message group to view")
+            self.metadata_label.clear()
+            self.message_nav_label.setText("No messages")
+            self.prev_msg_btn.setEnabled(False)
+            self.next_msg_btn.setEnabled(False)
+            self.mark_read_btn.setEnabled(False)
+            self.mark_all_read_btn.setEnabled(False)
+            self.delete_all_btn.setEnabled(False)
+            self.block_btn.setEnabled(False)
+            self.delete_btn.setEnabled(False)
         return all_succeeded
 
     def _delete_group(self):
@@ -900,6 +948,10 @@ class MainWindow(QMainWindow):
             return
 
         group = self.current_groups[self.current_group_index]
+        self._delete_group_for_group(group)
+
+    def _delete_group_for_group(self, group: MessageGroup):
+        """Delete all messages in a specific group."""
         reply = QMessageBox.question(
             self,
             "Delete All",
@@ -920,6 +972,10 @@ class MainWindow(QMainWindow):
             return
 
         group = self.current_groups[self.current_group_index]
+        self._block_sender_for_group(group)
+
+    def _block_sender_for_group(self, group: MessageGroup):
+        """Block a sender for a specific group and delete grouped messages."""
         sender = group.sender_email
 
         if not self.blocklist:

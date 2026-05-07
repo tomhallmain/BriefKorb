@@ -81,9 +81,38 @@ def messages_view(request):
             # Handle exclude read toggle
             if 'excludeRead' in request.POST:
                 exclude_read = bool(request.POST.getlist('excludeRead'))
+
+            # Handle single-sender context menu actions
+            context_sender = request.POST.get('context_sender', '').strip()
+            context_action = request.POST.get('context_action', '').strip()
+            if context_sender and context_action:
+                selected_senders = [context_sender]
+                if context_action == 'markAsRead':
+                    success = messages_service.mark_messages_as_read(selected_senders, mailbox)
+                    if success:
+                        django_messages.success(request, f"Marked messages from {context_sender} as read.")
+                    else:
+                        django_messages.error(request, f"Failed to mark messages from {context_sender} as read.")
+                elif context_action == 'deleteMessage':
+                    success = messages_service.delete_messages(selected_senders, mailbox)
+                    if success:
+                        django_messages.success(request, f"Deleted messages from {context_sender}.")
+                    else:
+                        django_messages.error(request, f"Failed to delete messages from {context_sender}.")
+                elif context_action == 'deleteMessageBlockSender':
+                    delete_success = messages_service.delete_messages(selected_senders, mailbox)
+                    block_success = messages_service.block_senders(selected_senders)
+                    if delete_success and block_success:
+                        django_messages.success(request, f"Deleted messages and blocked {context_sender}.")
+                    elif delete_success:
+                        django_messages.warning(request, f"Deleted messages from {context_sender}, but failed to create block rule.")
+                    else:
+                        django_messages.error(request, f"Failed to delete messages from {context_sender}.")
+
+                has_performed_update = True
             
             # Handle actions on selected senders
-            if 'selected_options' in request.POST:
+            if 'selected_options' in request.POST and not (context_sender and context_action):
                 selected_senders = request.POST.getlist('selected_options')
                 action = None
                 

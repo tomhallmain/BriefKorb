@@ -43,6 +43,8 @@
     
     <form method="POST">
         {% csrf_token %}
+        <input type="hidden" id="context_sender" name="context_sender" value="">
+        <input type="hidden" id="context_action" name="context_action" value="">
         <div class="row">
             <div class="col">
                 <button type="submit" name="markAsRead" class="btn btn-primary btn-sm mb-3">Mark Messages As Read</button>
@@ -91,7 +93,7 @@
             <tbody>
                 {% if messageData %}
                     {% for messageInfo in messageData %}
-                        <tr>
+                        <tr class="sender-row" data-sender-name="{{ messageInfo.fromName }}">
                             <td>
                                 <input type="checkbox" name="selected_options" value="{{ messageInfo.fromName }}">
                             </td>
@@ -118,13 +120,91 @@
     </form>
 </div>
 
+<div id="groupContextMenu" class="group-context-menu">
+    <button type="button" data-action="markAsRead">Mark Group as Read</button>
+    <button type="button" data-action="deleteMessage">Delete Group</button>
+    <button type="button" data-action="deleteMessageBlockSender">Delete Group and Block Sender</button>
+</div>
+
 {% load static %}
 <script type="text/javascript" src="{% static 'sortable/sortable.js' %}"></script>
+<style>
+.group-context-menu {
+    position: fixed;
+    display: none;
+    z-index: 1000;
+    min-width: 240px;
+    background: #ffffff;
+    border: 1px solid #ced4da;
+    border-radius: 4px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+    padding: 4px 0;
+}
+
+.group-context-menu button {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    text-align: left;
+    padding: 8px 12px;
+}
+
+.group-context-menu button:hover {
+    background: #f1f3f5;
+}
+</style>
 <script>
 function toggleSelectAll() {
     const selectAll = document.getElementById('selectAll');
     const checkboxes = document.querySelectorAll('input[name="selected_options"]');
     checkboxes.forEach(cb => cb.checked = selectAll.checked);
 }
+
+const senderContextMenu = document.getElementById('groupContextMenu');
+const contextSenderInput = document.getElementById('context_sender');
+const contextActionInput = document.getElementById('context_action');
+const messagesForm = document.querySelector('form[method="POST"]');
+let activeSender = '';
+
+function hideSenderContextMenu() {
+    senderContextMenu.style.display = 'none';
+    activeSender = '';
+}
+
+document.querySelectorAll('.sender-row').forEach(row => {
+    row.addEventListener('contextmenu', function(event) {
+        event.preventDefault();
+        activeSender = this.dataset.senderName || '';
+        if (!activeSender) {
+            return;
+        }
+
+        senderContextMenu.style.display = 'block';
+        senderContextMenu.style.left = `${event.clientX}px`;
+        senderContextMenu.style.top = `${event.clientY}px`;
+    });
+});
+
+senderContextMenu.querySelectorAll('button[data-action]').forEach(button => {
+    button.addEventListener('click', function() {
+        if (!activeSender) {
+            return;
+        }
+
+        contextSenderInput.value = activeSender;
+        contextActionInput.value = this.dataset.action;
+        messagesForm.submit();
+    });
+});
+
+document.addEventListener('click', function() {
+    hideSenderContextMenu();
+});
+
+document.addEventListener('keydown', function(event) {
+    if (event.key === 'Escape') {
+        hideSenderContextMenu();
+    }
+});
 </script>
 {% endblock %}
