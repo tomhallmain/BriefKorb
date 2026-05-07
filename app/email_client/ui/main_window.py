@@ -8,7 +8,7 @@ from typing import Optional, List
 from datetime import datetime
 
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
+    QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QPushButton, QComboBox, QLabel, QListWidget, QListWidgetItem, QTextEdit,
     QLineEdit, QMessageBox, QStatusBar, QProgressBar, QGroupBox, QMenu,
     QSizePolicy
@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from email_server import UnifiedEmailServer, EmailMessage, AuthenticatedProvider
 from email_server.config import EmailServerConfig
 from email_server.blocked_sender_tracking import BlockedSenderTracker, BlockEvent
+from lib.multi_display_qt import SmartMainWindow
 
 from widgets.message_list_item import MessageListItem
 from widgets.compose_dialog import ComposeDialog
@@ -50,11 +51,11 @@ class _BodyTextEdit(QTextEdit):
         return QSize(0, 0)
 
 
-class MainWindow(QMainWindow):
+class MainWindow(SmartMainWindow):
     """Main application window"""
     
     def __init__(self):
-        super().__init__()
+        super().__init__(restore_geometry=True)
         self.server: Optional[UnifiedEmailServer] = None
         self.current_messages: List[EmailMessage] = []
         self.current_groups: List[MessageGroup] = []
@@ -457,6 +458,7 @@ class MainWindow(QMainWindow):
         """
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
+        self.restore_window_geometry()
         self.splitter.setSizes(self._splitter_sizes)
         self.splitter.splitterMoved.connect(self._on_splitter_moved)
 

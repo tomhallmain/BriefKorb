@@ -47,14 +47,11 @@ class AppInfoCache():
 
     @staticmethod
     def _get_position_data_class():
-        # Prefer Qt in active Qt runtime, fallback to Tk implementation.
-        if AppInfoCache._is_qt_runtime_active():
-            try:
-                from lib.position_data_qt import PositionData as QtPositionData
-                return QtPositionData
-            except Exception:
-                pass
-        raise Exception("Invalid runtime environment: no Qt runtime active")
+        try:
+            from lib.position_data_qt import PositionData as QtPositionData
+            return QtPositionData
+        except Exception:
+            return None
 
     def get_cache_dict(self, scope_key: str = "info") -> Dict:
         """Get the cache dictionary to monitor (required by InflationMonitor)."""
@@ -189,12 +186,18 @@ class AppInfoCache():
     def set_display_position(self, master):
         """Store the main window's display position and size."""
         pd_cls = AppInfoCache._get_position_data_class()
+        if pd_cls is None:
+            # Non-Qt runtimes (e.g. Django) should keep existing cache values as-is.
+            return
         self.set("display_position", pd_cls.from_master(master).to_dict())
 
     def set_virtual_screen_info(self, master):
         """Store the virtual screen information."""
         try:
             pd_cls = AppInfoCache._get_position_data_class()
+            if pd_cls is None:
+                # Non-Qt runtimes (e.g. Django) should keep existing cache values as-is.
+                return
             pd = pd_cls.from_master_virtual_screen(master)
             if pd is not None:
                 self.set("virtual_screen_info", pd.to_dict())
@@ -207,10 +210,12 @@ class AppInfoCache():
         if not virtual_screen_data:
             return None
         pd_cls = AppInfoCache._get_position_data_class()
+        if pd_cls is None:
+            return virtual_screen_data
         try:
             return pd_cls.from_dict(virtual_screen_data)
         except Exception:
-            return TkPositionData.from_dict(virtual_screen_data)
+            return None
 
     def get_display_position(self):
         """Get the cached display position, returns None if not set or invalid."""
@@ -218,10 +223,12 @@ class AppInfoCache():
         if not position_data:
             return None
         pd_cls = AppInfoCache._get_position_data_class()
+        if pd_cls is None:
+            return position_data
         try:
             return pd_cls.from_dict(position_data)
         except Exception:
-            return TkPositionData.from_dict(position_data)
+            return None
 
     def get_directory_color(self, directory: str):
         """Return the stored custom title-bar color for *directory*, or None."""
