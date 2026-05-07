@@ -24,6 +24,8 @@ class ImpactInference:
     impact: ImpactLevel
     reason: str
     confidence: float
+    generic_inference_score: float = 0.0
+    blocklist_inference_score: float = 0.0
 
 
 class SenderCategorizationManager:
@@ -32,6 +34,8 @@ class SenderCategorizationManager:
     SENDERS_KEY = "sender_impact_by_sender"
     GROUPS_KEY = "sender_group_impact_by_domain"
     EXCEPTIONS_KEY = "sender_impact_exceptions"
+    BLOCKED_SENDERS_KEY = "blocked_senders"
+    BLOCKED_EVENTS_KEY = "blocked_sender_events"
 
     def __init__(self, storage_path: str):
         self._cache = get_app_info_cache(storage_path)
@@ -93,6 +97,8 @@ class SenderCategorizationManager:
             "impact": inference.impact.value,
             "reason": inference.reason,
             "confidence": inference.confidence,
+            "generic_inference_score": inference.generic_inference_score,
+            "blocklist_inference_score": inference.blocklist_inference_score,
             "source": "inferred",
             "updated_at": self._now(),
         }
@@ -106,6 +112,8 @@ class SenderCategorizationManager:
             "impact": inference.impact.value,
             "reason": inference.reason,
             "confidence": inference.confidence,
+            "generic_inference_score": inference.generic_inference_score,
+            "blocklist_inference_score": inference.blocklist_inference_score,
             "source": "inferred",
             "updated_at": self._now(),
         }
@@ -126,7 +134,6 @@ class SenderCategorizationManager:
         return self._infer_from_sender_data(sender, domain, haystack)
 
     def _infer_from_sender_data(self, sender: str, domain: str, haystack: str) -> ImpactInference:
-
         low_impact_domains = ("news", "mailer", "marketing", "promotions", "updates")
         low_impact_terms = ("unsubscribe", "sale", "offer", "sponsored", "promo")
         high_impact_terms = (
@@ -139,16 +146,95 @@ class SenderCategorizationManager:
             "account action",
             "invoice",
         )
+        high_generic_score = 0.0
+        low_generic_score = 0.0
+        generic_reason = "insufficient confidence"
 
         if any(term in haystack for term in high_impact_terms):
-            return ImpactInference(ImpactLevel.HIGH_IMPACT, "contains account/security action terms", 0.8)
-        if any(term in haystack for term in low_impact_terms):
-            return ImpactInference(ImpactLevel.LOW_IMPACT, "contains promotional/subscription terms", 0.75)
-        if any(part in domain for part in low_impact_domains):
-            return ImpactInference(ImpactLevel.LOW_IMPACT, "sender domain resembles marketing/bulk sender", 0.65)
-        if "noreply" in sender or "no-reply" in sender:
-            return ImpactInference(ImpactLevel.LOW_IMPACT, "automated no-reply sender", 0.6)
-        return ImpactInference(ImpactLevel.UNCLASSIFIED, "insufficient confidence", 0.0)
+            high_generic_score = 0.8
+            generic_reason = "contains account/security action terms"
+        elif any(term in haystack for term in low_impact_terms):
+            low_generic_score = 0.75
+            generic_reason = "contains promotional/subscription terms"
+        elif any(part in domain for part in low_impact_domains):
+            low_generic_score = 0.65
+            generic_reason = "sender domain resembles marketing/bulk sender"
+        elif "noreply" in sender or "no-reply" in sender:
+            low_generic_score = 0.6
+            generic_reason = "automated no-reply sender"
+
+        generic_score = max(high_generic_score, low_generic_score)
+        blocklist_score = self._score_blocklist_evidence(sender, domain)
+
+        if blocklist_score >= 0.7:
+            confidence = max(0.75, blocklist_score)
+            return ImpactInference(
+                ImpactLevel.LOW_IMPACT,
+                "historical blocklist evidence indicates low-impact sender",
+                confidence,
+                generic_score,
+                blocklist_score,
+            )
+        if high_generic_score >= 0.7 and high_generic_score > low_generic_score:
+            return ImpactInference(
+                ImpactLevel.HIGH_IMPACT,
+                generic_reason,
+                high_generic_score,
+                generic_score,
+                blocklist_score,
+            )
+        if low_generic_score >= 0.6:
+            return ImpactInference(
+                ImpactLevel.LOW_IMPACT,
+                generic_reason,
+                low_generic_score,
+                generic_score,
+                blocklist_score,
+            )
+        return ImpactInference(
+            ImpactLevel.UNCLASSIFIED,
+            "insufficient confidence",
+            0.0,
+            generic_score,
+            blocklist_score,
+        )
+
+    def _score_blocklist_evidence(self, sender: str, domain: str) -> float:
+        blocked_senders = self._cache.get(self.BLOCKED_SENDERS_KEY, [])
+        if not isinstance(blocked_senders, list):
+            blocked_senders = []
+        blocked_set = {str(entry).strip().lower() for entry in blocked_senders if str(entry).strip()}
+        if sender in blocked_set:
+            return 1.0
+
+        blocked_domains = {
+            entry.split("@", 1)[1]
+            for entry in blocked_set
+            if "@" in entry
+        }
+        score = 0.85 if domain in blocked_domains else 0.0
+
+        blocked_events = self._cache.get(self.BLOCKED_EVENTS_KEY, [])
+        if not isinstance(blocked_events, list):
+            blocked_events = []
+
+        sender_event_count = 0
+        domain_event_count = 0
+        for event in blocked_events:
+            if not isinstance(event, dict):
+                continue
+            event_sender = str(event.get("sender", "")).strip().lower()
+            if not event_sender:
+                continue
+            event_domain = event_sender.split("@", 1)[1] if "@" in event_sender else ""
+            if event_sender == sender:
+                sender_event_count += 1
+            if event_domain and event_domain == domain:
+                domain_event_count += 1
+
+        sender_event_score = min(0.95, sender_event_count * 0.25)
+        domain_event_score = min(0.75, domain_event_count * 0.1)
+        return max(score, sender_event_score, domain_event_score)
 
     def infer_and_store_groups(self, groups: Iterable[MessageGroup]) -> None:
         for group in groups:
@@ -174,6 +260,8 @@ class SenderCategorizationManager:
                     "source": effective.get("source", "unknown"),
                     "reason": effective.get("reason", ""),
                     "confidence": effective.get("confidence"),
+                    "generic_inference_score": inferred.get("generic_inference_score", 0.0),
+                    "blocklist_inference_score": inferred.get("blocklist_inference_score", 0.0),
                     "has_exception": sender in exceptions,
                     "inferred_impact": inferred.get("impact", ImpactLevel.UNCLASSIFIED.value),
                 }

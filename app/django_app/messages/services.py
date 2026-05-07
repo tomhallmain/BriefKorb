@@ -199,6 +199,8 @@ class MessagesService:
             inference = self.sender_categorization.infer_for_sender(sender_address, [subject])
             self.sender_categorization.set_inferred_sender_impact(sender_address, inference)
             message_info['impact'] = self.sender_categorization.get_sender_impact(sender_address).value
+            message_info['genericInferenceScore'] = inference.generic_inference_score
+            message_info['blocklistInferenceScore'] = inference.blocklist_inference_score
             message_info['hasImpactException'] = self.sender_categorization.has_sender_exception(sender_address)
         return message_data
 
