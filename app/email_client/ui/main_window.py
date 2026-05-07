@@ -26,12 +26,14 @@ from lib.multi_display_qt import SmartMainWindow
 from widgets.message_list_item import MessageListItem
 from widgets.compose_dialog import ComposeDialog
 from ui.auth_settings_dialog import AuthSettingsDialog
+from ui.sender_categorization_window import SenderCategorizationWindow
 from email_client.utils.scope_checker import ScopeChecker
 from email_client.utils.message_grouping import MessageGroup, group_messages_by_sender
 from email_client.utils.content_type import ContentType
 from email_client.utils.workers import EmailWorkerThread, MessageBodyWorkerThread
 from email_client.utils.html_utils import sanitize_html, convert_plain_text_to_html, is_html_content, strip_images_for_debug
 from email_client.utils.blocklist import BlocklistManager
+from email_client.utils.sender_categorization import SenderCategorizationManager
 from lib.loading_spinner_qt import LoadingSpinnerBadge
 
 
@@ -68,6 +70,8 @@ class MainWindow(SmartMainWindow):
         self.config_path: Optional[str] = None
         self.blocklist: Optional[BlocklistManager] = None
         self.blocked_sender_tracker: Optional[BlockedSenderTracker] = None
+        self.sender_categorization: Optional[SenderCategorizationManager] = None
+        self.sender_categorization_window: Optional[SenderCategorizationWindow] = None
         # Desired splitter widths — updated only when the user drags the handle.
         # Used to restore positions after content-driven layout passes.
         self._splitter_sizes: List[int] = [400, 600]
@@ -163,6 +167,11 @@ class MainWindow(SmartMainWindow):
         self.settings_btn = QPushButton("Settings")
         self.settings_btn.clicked.connect(self._open_settings)
         layout.addWidget(self.settings_btn)
+
+        # Categorization button
+        self.categorization_btn = QPushButton("Categorize Senders")
+        self.categorization_btn.clicked.connect(self._open_sender_categorization)
+        layout.addWidget(self.categorization_btn)
         
         layout.addStretch()
         
@@ -180,6 +189,10 @@ class MainWindow(SmartMainWindow):
         self.unread_only_checkbox.setCheckable(True)
         self.unread_only_checkbox.clicked.connect(self._load_messages)
         filter_layout.addWidget(self.unread_only_checkbox)
+        self.high_impact_only_checkbox = QPushButton("High-Impact Only")
+        self.high_impact_only_checkbox.setCheckable(True)
+        self.high_impact_only_checkbox.clicked.connect(self._update_message_list)
+        filter_layout.addWidget(self.high_impact_only_checkbox)
         filter_layout.addStretch()
         layout.addLayout(filter_layout)
         
@@ -351,6 +364,7 @@ class MainWindow(SmartMainWindow):
             self.server = UnifiedEmailServer(config=self.config)
             self.blocklist = BlocklistManager(self.config.token_storage_path)
             self.blocked_sender_tracker = BlockedSenderTracker(self.config.token_storage_path)
+            self.sender_categorization = SenderCategorizationManager(self.config.token_storage_path)
             self._update_ui_permissions()
             self._update_auth_status()
             self.statusBar.showMessage("Configuration loaded successfully")
@@ -545,6 +559,8 @@ class MainWindow(SmartMainWindow):
         self.current_messages = messages
         # Group messages by sender
         self.current_groups = group_messages_by_sender(messages)
+        if self.sender_categorization:
+            self.sender_categorization.infer_and_store_groups(self.current_groups)
         self.current_group_index = None
         self.current_message_index = 0
         self._update_message_list()
@@ -570,12 +586,19 @@ class MainWindow(SmartMainWindow):
         self.message_list.clear()
         
         unread_only = self.unread_only_checkbox.isChecked()
+        high_impact_only = self.high_impact_only_checkbox.isChecked()
         
         # Filter groups based on unread filter
         if unread_only:
             groups_to_show = [g for g in self.current_groups if g.unread_count > 0]
         else:
             groups_to_show = self.current_groups
+
+        if high_impact_only and self.sender_categorization:
+            groups_to_show = [
+                g for g in groups_to_show
+                if self.sender_categorization.is_high_impact_group(g)
+            ]
         
         # Add groups to list
         for group in groups_to_show:
@@ -1216,3 +1239,17 @@ class MainWindow(SmartMainWindow):
                 "Settings Updated",
                 "Configuration has been updated. The email server has been reloaded."
             )
+
+    def _open_sender_categorization(self):
+        """Open sender recategorization window."""
+        if not self.sender_categorization:
+            QMessageBox.warning(self, "Not Ready", "Sender categorization is not available yet.")
+            return
+        if self.sender_categorization_window is None:
+            self.sender_categorization_window = SenderCategorizationWindow(
+                manager=self.sender_categorization,
+                parent=self,
+            )
+        self.sender_categorization_window.show()
+        self.sender_categorization_window.raise_()
+        self.sender_categorization_window.activateWindow()
