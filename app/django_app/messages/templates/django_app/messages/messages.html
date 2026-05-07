@@ -77,6 +77,13 @@
                 </label>
                 <button type="submit" name="excludeRead" class="btn btn-secondary btn-sm ml-2">Update</button>
             </div>
+            <div class="col">
+                <label>
+                    <input type="checkbox" name="highImpactOnly" value="highImpactOnly" {% if high_impact_only %}checked{% endif %}>
+                    High-Impact Only
+                </label>
+                <button type="submit" name="highImpactOnly" class="btn btn-secondary btn-sm ml-2">Update</button>
+            </div>
         </div>
         <br>
         <table class="table sortable">
@@ -88,6 +95,8 @@
                     <th scope="col">Subject</th>
                     <th scope="col">Last Received</th>
                     <th scope="col">Count</th>
+                    <th scope="col">Impact</th>
+                    <th scope="col">Override</th>
                 </tr>
             </thead>
             <tbody>
@@ -108,11 +117,25 @@
                                 {% endif %}
                             </td>
                             <td>{{ messageInfo.count }}</td>
+                            <td>
+                                <span class="badge {% if messageInfo.impact == 'high-impact' %}badge-danger{% elif messageInfo.impact == 'low-impact' %}badge-secondary{% else %}badge-light{% endif %}">
+                                    {{ messageInfo.impact|default:'unclassified' }}
+                                </span>
+                            </td>
+                            <td>
+                                {% if messageInfo.fromAddress %}
+                                    <button type="submit" name="setImpact" value="{{ messageInfo.fromAddress }}|high-impact" class="btn btn-outline-danger btn-sm">High</button>
+                                    <button type="submit" name="setImpact" value="{{ messageInfo.fromAddress }}|low-impact" class="btn btn-outline-secondary btn-sm">Low</button>
+                                    <button type="submit" name="clearImpact" value="{{ messageInfo.fromAddress }}" class="btn btn-outline-dark btn-sm">Clear</button>
+                                {% else %}
+                                    <span class="text-muted">N/A</span>
+                                {% endif %}
+                            </td>
                         </tr>
                     {% endfor %}
                 {% else %}
                     <tr>
-                        <td colspan="6" class="text-center text-muted">No messages found</td>
+                        <td colspan="8" class="text-center text-muted">No messages found</td>
                     </tr>
                 {% endif %}
             </tbody>

@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from email_server.config import EmailServerConfig
 from email_server.auth import TokenManager
+from email_client.utils.sender_categorization import ImpactLevel
 from .services import MessagesService
 from django_app.calendar.services import get_iana_from_windows
 
@@ -68,6 +69,7 @@ def messages_view(request):
         default_mailbox = 'inbox'
         mailbox = default_mailbox
         exclude_read = True
+        high_impact_only = False
         has_performed_update = False
         
         # Handle POST requests
@@ -81,6 +83,23 @@ def messages_view(request):
             # Handle exclude read toggle
             if 'excludeRead' in request.POST:
                 exclude_read = bool(request.POST.getlist('excludeRead'))
+            if 'highImpactOnly' in request.POST:
+                high_impact_only = bool(request.POST.getlist('highImpactOnly'))
+
+            set_impact_value = request.POST.get('setImpact', '').strip()
+            clear_impact_sender = request.POST.get('clearImpact', '').strip()
+            if set_impact_value:
+                try:
+                    sender, impact = set_impact_value.split('|', 1)
+                    messages_service.set_sender_impact_exception(sender, impact)
+                    django_messages.success(request, f"Updated sender impact for {sender}.")
+                    has_performed_update = True
+                except ValueError:
+                    django_messages.error(request, "Invalid sender impact update request.")
+            elif clear_impact_sender:
+                messages_service.set_sender_impact_exception(clear_impact_sender, None)
+                django_messages.success(request, f"Cleared sender impact override for {clear_impact_sender}.")
+                has_performed_update = True
 
             # Handle single-sender context menu actions
             context_sender = request.POST.get('context_sender', '').strip()
@@ -161,6 +180,12 @@ def messages_view(request):
         
         # Aggregate by sender
         message_data = messages_service.aggregate_messages_by_sender(messages)
+        message_data = messages_service.annotate_sender_impact(message_data)
+        if high_impact_only:
+            message_data = [
+                msg_info for msg_info in message_data
+                if msg_info.get('impact') == ImpactLevel.HIGH_IMPACT.value
+            ]
         
         # Parse dates for template
         for msg_info in message_data:
@@ -175,6 +200,7 @@ def messages_view(request):
             'messages_length': len(messages),
             'mailbox': mailbox,
             'exclude_read_messages': exclude_read,
+            'high_impact_only': high_impact_only,
             'has_performed_update': has_performed_update,
             'is_authenticated': True,
         }

@@ -43,6 +43,11 @@ class SenderCategorizationManager:
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()
 
+    def has_sender_exception(self, sender_email: str) -> bool:
+        sender = sender_email.lower().strip()
+        exceptions = self._get_dict(self.EXCEPTIONS_KEY)
+        return sender in exceptions
+
     def get_sender_impact(self, sender_email: str) -> ImpactLevel:
         sender = sender_email.lower().strip()
         exceptions = self._get_dict(self.EXCEPTIONS_KEY)
@@ -112,6 +117,15 @@ class SenderCategorizationManager:
         domain = group.sender_domain.lower()
         subjects = [((m.subject or "").lower()) for m in group.messages[:5]]
         haystack = " ".join(subjects)
+        return self._infer_from_sender_data(sender, domain, haystack)
+
+    def infer_for_sender(self, sender_email: str, subjects: List[str]) -> ImpactInference:
+        sender = sender_email.lower().strip()
+        domain = sender.split("@")[1].lower() if "@" in sender else sender
+        haystack = " ".join((s or "").lower() for s in subjects[:5])
+        return self._infer_from_sender_data(sender, domain, haystack)
+
+    def _infer_from_sender_data(self, sender: str, domain: str, haystack: str) -> ImpactInference:
 
         low_impact_domains = ("news", "mailer", "marketing", "promotions", "updates")
         low_impact_terms = ("unsubscribe", "sale", "offer", "sponsored", "promo")

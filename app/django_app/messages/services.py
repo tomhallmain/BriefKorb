@@ -17,6 +17,7 @@ from email_server.config import EmailServerConfig
 from email_server.auth import MicrosoftOAuth, TokenManager
 from email_server.providers.microsoft.microsoft import MicrosoftGraphProvider
 from email_server.blocked_sender_tracking import BlockedSenderTracker, BlockEvent
+from email_client.utils.sender_categorization import SenderCategorizationManager, ImpactLevel
 
 
 class MessagesService:
@@ -59,6 +60,7 @@ class MessagesService:
             scopes=self.config.microsoft.scopes
         )
         self.blocked_sender_tracker = BlockedSenderTracker(self.config.token_storage_path)
+        self.sender_categorization = SenderCategorizationManager(self.config.token_storage_path)
     
     def _get_headers(self, timezone: Optional[str] = None) -> Dict[str, str]:
         """Get request headers with authentication token"""
@@ -186,6 +188,28 @@ class MessagesService:
         )
         
         return message_data_list
+
+    def annotate_sender_impact(self, message_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Infer and annotate sender impact for message groups."""
+        for message_info in message_data:
+            sender_address = (message_info.get('fromAddress') or '').strip().lower()
+            if not sender_address:
+                continue
+            subject = message_info.get('subject') or ''
+            inference = self.sender_categorization.infer_for_sender(sender_address, [subject])
+            self.sender_categorization.set_inferred_sender_impact(sender_address, inference)
+            message_info['impact'] = self.sender_categorization.get_sender_impact(sender_address).value
+            message_info['hasImpactException'] = self.sender_categorization.has_sender_exception(sender_address)
+        return message_data
+
+    def set_sender_impact_exception(self, sender_address: str, impact: Optional[str]) -> None:
+        sender = (sender_address or '').strip().lower()
+        if not sender:
+            return
+        if not impact:
+            self.sender_categorization.clear_sender_exception(sender)
+            return
+        self.sender_categorization.set_sender_exception(sender, ImpactLevel(impact), source='django_manual_exception')
     
     def mark_messages_as_read(self, sender_names: List[str], mailbox: str = 'inbox') -> bool:
         """Mark messages from specific senders as read
