@@ -7,9 +7,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, Optional
 
+from email_server.utils.app_info_cache import get_app_info_cache
 
 @dataclass(frozen=True)
 class BlockEvent:
@@ -40,10 +40,11 @@ class BlockEvent:
 
 
 class BlockedSenderTracker:
-    """Persists blocked-sender events as JSONL for offline analysis/training."""
+    """Persists blocked-sender events in encrypted app cache."""
+    CACHE_KEY = "blocked_sender_events"
 
     def __init__(self, storage_path: str):
-        self.path = Path(storage_path) / "blocked_sender_events.jsonl"
+        self._cache = get_app_info_cache(storage_path)
 
     def record(self, event: BlockEvent) -> None:
         """Append one block event. Failures are intentionally non-fatal."""
@@ -51,10 +52,12 @@ class BlockedSenderTracker:
             payload = event.to_record()
             if not payload["sender"]:
                 return
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(payload, sort_keys=True))
-                f.write("\n")
+            existing = self._cache.get(self.CACHE_KEY, [])
+            if not isinstance(existing, list):
+                existing = []
+            existing.append(json.loads(json.dumps(payload, sort_keys=True)))
+            self._cache.set(self.CACHE_KEY, existing)
+            self._cache.store()
         except Exception:
             # Tracking must never break message operations.
             return

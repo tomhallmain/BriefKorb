@@ -1,34 +1,29 @@
-"""
-Blocklist manager for filtering messages from blocked senders
-"""
+"""Blocklist manager backed by encrypted app cache."""
 
-import json
-from pathlib import Path
 from typing import Set
+
+from email_server.utils.app_info_cache import get_app_info_cache
 
 
 class BlocklistManager:
     """Manages a persistent list of blocked sender email addresses"""
+    CACHE_KEY = "blocked_senders"
 
     def __init__(self, storage_path: str):
-        self.path = Path(storage_path) / 'blocklist.json'
+        self._cache = get_app_info_cache(storage_path)
         self._blocked: Set[str] = self._load()
 
     def _load(self) -> Set[str]:
         try:
-            if self.path.exists():
-                data = json.loads(self.path.read_text(encoding='utf-8'))
-                return set(addr.lower() for addr in data.get('blocked_senders', []))
+            data = self._cache.get(self.CACHE_KEY, [])
+            return set(addr.lower() for addr in data)
         except Exception:
             pass
         return set()
 
     def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps({'blocked_senders': sorted(self._blocked)}, indent=2),
-            encoding='utf-8'
-        )
+        self._cache.set(self.CACHE_KEY, sorted(self._blocked))
+        self._cache.store()
 
     def block(self, email: str) -> None:
         self._blocked.add(email.lower())
