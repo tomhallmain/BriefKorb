@@ -2,6 +2,8 @@
 Theme and styling for the Email Client application
 """
 
+ACCENT_COLOR = "#008a8f"
+
 
 def get_dark_theme_stylesheet() -> str:
     """Get dark theme stylesheet for the application with subtle teal coloration"""

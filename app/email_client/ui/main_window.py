@@ -32,6 +32,7 @@ from email_client.utils.content_type import ContentType
 from email_client.utils.workers import EmailWorkerThread, MessageBodyWorkerThread
 from email_client.utils.html_utils import sanitize_html, convert_plain_text_to_html, is_html_content, strip_images_for_debug
 from email_client.utils.blocklist import BlocklistManager
+from lib.loading_spinner_qt import LoadingSpinnerBadge
 
 
 class _BodyTextEdit(QTextEdit):
@@ -119,6 +120,8 @@ class MainWindow(SmartMainWindow):
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         self.statusBar.addPermanentWidget(self.progress_bar)
+        self.messages_loading_spinner = LoadingSpinnerBadge(self)
+        self.statusBar.addPermanentWidget(self.messages_loading_spinner)
     
     def _create_toolbar(self) -> QWidget:
         """Create the top toolbar"""
@@ -277,8 +280,16 @@ class MainWindow(SmartMainWindow):
         body_layout.setContentsMargins(0, 0, 0, 0)
         
         # Loading indicator for message content
+        loading_row = QWidget()
+        loading_row_layout = QHBoxLayout(loading_row)
+        loading_row_layout.setContentsMargins(0, 0, 0, 0)
+        loading_row_layout.setSpacing(8)
+        loading_row_layout.addStretch()
+
+        self.message_loading_spinner = LoadingSpinnerBadge(self)
+        loading_row_layout.addWidget(self.message_loading_spinner)
+
         self.message_loading_label = QLabel("Loading message content...")
-        self.message_loading_label.setAlignment(Qt.AlignCenter)
         self.message_loading_label.setStyleSheet(
             "background-color: rgba(30, 32, 31, 200); "
             "color: #008a8f; "
@@ -286,8 +297,11 @@ class MainWindow(SmartMainWindow):
             "font-style: italic; "
             "border-radius: 3px;"
         )
-        self.message_loading_label.setVisible(False)
-        body_layout.addWidget(self.message_loading_label)
+        loading_row_layout.addWidget(self.message_loading_label)
+        loading_row_layout.addStretch()
+        loading_row.setVisible(False)
+        self.message_loading_row = loading_row
+        body_layout.addWidget(loading_row)
         
         # Message body
         self.message_body = _BodyTextEdit()
@@ -508,6 +522,7 @@ class MainWindow(SmartMainWindow):
         # Show progress
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)  # Indeterminate
+        self.messages_loading_spinner.start()
         self.statusBar.showMessage("Loading messages...")
         self.refresh_btn.setEnabled(False)
         
@@ -536,6 +551,7 @@ class MainWindow(SmartMainWindow):
         
         # Hide progress
         self.progress_bar.setVisible(False)
+        self.messages_loading_spinner.stop()
         total_messages = len(messages)
         total_groups = len(self.current_groups)
         self.statusBar.showMessage(f"Loaded {total_messages} messages in {total_groups} groups")
@@ -544,6 +560,7 @@ class MainWindow(SmartMainWindow):
     def _on_load_error(self, error: str):
         """Handle error from worker thread"""
         self.progress_bar.setVisible(False)
+        self.messages_loading_spinner.stop()
         self.statusBar.showMessage(f"Error: {error}")
         self.refresh_btn.setEnabled(True)
         QMessageBox.critical(self, "Error Loading Messages", f"Failed to load messages:\n{error}")
@@ -698,7 +715,8 @@ class MainWindow(SmartMainWindow):
 
         # Load body content in background — sanitising HTML can involve network
         # I/O (image downloads) and must not block the main thread.
-        self.message_loading_label.setVisible(True)
+        self.message_loading_row.setVisible(True)
+        self.message_loading_spinner.start()
         self.message_body.clear()
         self._current_html = None
         self.open_browser_btn.setEnabled(False)
@@ -719,6 +737,8 @@ class MainWindow(SmartMainWindow):
     def _on_body_content_ready(self, html: str):
         """Slot called from MessageBodyWorkerThread when HTML is ready."""
         self.message_loading_label.setVisible(False)
+        self.message_loading_row.setVisible(False)
+        self.message_loading_spinner.stop()
         self._current_html = html or None
         self.open_browser_btn.setEnabled(bool(html))
         self.save_debug_html_btn.setEnabled(bool(html))
@@ -735,6 +755,8 @@ class MainWindow(SmartMainWindow):
     def _on_body_load_error(self, error: str):
         """Slot called when body processing fails in the worker thread."""
         self.message_loading_label.setVisible(False)
+        self.message_loading_row.setVisible(False)
+        self.message_loading_spinner.stop()
         self.message_body.setPlainText(f"(Failed to load message content: {error})")
 
     def _open_in_browser(self):
