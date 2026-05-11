@@ -20,7 +20,7 @@ class FakeCache:
     def get(self, key: str, default: Any = None) -> Any:
         return self.data.get(key, default)
 
-    def set(self, key: str, value: Any) -> None:
+    def set(self, key: str, value: Any, **kwargs: Any) -> None:
         self.data[key] = value
 
     def store(self) -> None:
@@ -86,6 +86,8 @@ def test_manual_exception_prevents_inferred_overwrite(fake_cache: FakeCache) -> 
             confidence=0.9,
             generic_inference_score=0.9,
             blocklist_inference_score=0.9,
+            bot_spam_inference_score=0.0,
+            decision_trace=("test",),
         ),
     )
 
@@ -119,6 +121,35 @@ def test_bot_spam_randomized_sender_and_unicode_content(fake_cache: FakeCache) -
     assert inference.bot_spam_inference_score >= 0.65
     assert inference.impact == ImpactLevel.LOW_IMPACT
     assert "mismatch" in inference.reason or "randomized" in inference.reason
+
+
+def test_substack_domain_classified_low_not_high(fake_cache: FakeCache) -> None:
+    manager = SenderCategorizationManager(storage_path="ignored")
+    inference = manager.infer_for_sender(
+        "author@substack.com",
+        ["The weekly essay"],
+    )
+    assert inference.impact == ImpactLevel.LOW_IMPACT
+    assert any("bulk" in t for t in inference.decision_trace)
+
+
+def test_financial_noreply_still_high_impact(fake_cache: FakeCache) -> None:
+    manager = SenderCategorizationManager(storage_path="ignored")
+    inference = manager.infer_for_sender(
+        "noreply@mybank.example",
+        ["Your credit card minimum payment is due"],
+    )
+    assert inference.impact == ImpactLevel.HIGH_IMPACT
+
+
+def test_personal_mac_mailbox_inclusion(fake_cache: FakeCache) -> None:
+    manager = SenderCategorizationManager(storage_path="ignored")
+    inference = manager.infer_for_sender(
+        "mom@mac.com",
+        ["Re: Sunday dinner"],
+    )
+    assert inference.impact == ImpactLevel.HIGH_IMPACT
+    assert any("personal_mailbox" in t for t in inference.decision_trace)
 
 
 def test_display_name_mismatch_increases_bot_spam_score(fake_cache: FakeCache) -> None:

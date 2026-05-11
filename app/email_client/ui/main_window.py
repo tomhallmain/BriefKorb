@@ -33,7 +33,7 @@ from email_client.utils.content_type import ContentType
 from email_client.utils.workers import EmailWorkerThread, MessageBodyWorkerThread
 from email_client.utils.html_utils import sanitize_html, convert_plain_text_to_html, is_html_content, strip_images_for_debug
 from email_client.utils.blocklist import BlocklistManager
-from email_client.utils.sender_categorization import SenderCategorizationManager
+from email_client.utils.sender_categorization import SenderCategorizationManager, ImpactLevel
 from lib.loading_spinner_qt import LoadingSpinnerBadge
 
 
@@ -191,10 +191,16 @@ class MainWindow(SmartMainWindow):
         filter_layout.addWidget(self.unread_only_checkbox)
         self.high_impact_only_checkbox = QPushButton("High-Impact Only")
         self.high_impact_only_checkbox.setCheckable(True)
-        self.high_impact_only_checkbox.clicked.connect(self._update_message_list)
+        self.high_impact_only_checkbox.setToolTip(
+            "When on, only sender groups scored as high-impact are shown. "
+            "Use Categorize Senders to inspect traces or set overrides."
+        )
+        self.high_impact_only_checkbox.toggled.connect(self._on_high_impact_filter_toggled)
         filter_layout.addWidget(self.high_impact_only_checkbox)
+        self.unread_only_checkbox.toggled.connect(self._sync_filter_button_labels)
         filter_layout.addStretch()
         layout.addLayout(filter_layout)
+        self._sync_filter_button_labels()
         
         # Message list
         self.message_list = QListWidget()
@@ -572,6 +578,7 @@ class MainWindow(SmartMainWindow):
         total_groups = len(self.current_groups)
         self.statusBar.showMessage(f"Loaded {total_messages} messages in {total_groups} groups")
         self.refresh_btn.setEnabled(True)
+        self._sync_filter_button_labels()
     
     def _on_load_error(self, error: str):
         """Handle error from worker thread"""
@@ -603,7 +610,7 @@ class MainWindow(SmartMainWindow):
         # Add groups to list
         for group in groups_to_show:
             # Create display text for the group
-            unread_indicator = "●" if group.unread_count > 0 else " "
+            unread_indicator = "●" if group.unread_count > 0 else "○"
             date_str = group.latest_date.strftime("%Y-%m-%d %H:%M")
             display_text = f"{unread_indicator} {group.display_name} ({group.count} messages) - {date_str}"
             
@@ -621,6 +628,10 @@ class MainWindow(SmartMainWindow):
             tooltip += f"Unread: {group.unread_count}\n"
             tooltip += f"Latest: {date_str}\n"
             tooltip += f"Content Type: {group.content_type.value}"
+            if self.sender_categorization:
+                trace = self.sender_categorization.get_sender_decision_trace(group.sender_email)
+                if trace:
+                    tooltip += "\n\nImpact trace:\n" + "\n".join(trace[:12])
             item.setToolTip(tooltip)
             
             self.message_list.addItem(item)
@@ -665,6 +676,14 @@ class MainWindow(SmartMainWindow):
         delete_action = menu.addAction("Delete Group")
         block_action = menu.addAction("Block Sender and Delete Group")
 
+        if self.sender_categorization:
+            menu.addSeparator()
+            high_impact_action = menu.addAction("Always treat sender as high-impact")
+            low_impact_action = menu.addAction("Always treat sender as low-impact")
+            clear_impact_action = menu.addAction("Clear impact override for this sender")
+        else:
+            high_impact_action = low_impact_action = clear_impact_action = None
+
         selected_action = menu.exec(self.message_list.mapToGlobal(position))
         if selected_action is mark_read_action:
             self._mark_group_as_read_for_group(group)
@@ -672,6 +691,15 @@ class MainWindow(SmartMainWindow):
             self._delete_group_for_group(group)
         elif selected_action is block_action:
             self._block_sender_for_group(group)
+        elif self.sender_categorization and selected_action is high_impact_action:
+            self.sender_categorization.set_sender_exception(group.sender_email, ImpactLevel.HIGH_IMPACT)
+            self._update_message_list()
+        elif self.sender_categorization and selected_action is low_impact_action:
+            self.sender_categorization.set_sender_exception(group.sender_email, ImpactLevel.LOW_IMPACT)
+            self._update_message_list()
+        elif self.sender_categorization and selected_action is clear_impact_action:
+            self.sender_categorization.clear_sender_exception(group.sender_email)
+            self._infer_store_current_groups()
 
     def _find_group_index(self, group: MessageGroup) -> Optional[int]:
         """Find current group index by sender identity."""
@@ -1240,6 +1268,32 @@ class MainWindow(SmartMainWindow):
                 "Configuration has been updated. The email server has been reloaded."
             )
 
+    def _sync_filter_button_labels(self) -> None:
+        self.unread_only_checkbox.setText(
+            "Unread Only (on)" if self.unread_only_checkbox.isChecked() else "Unread Only"
+        )
+        self.high_impact_only_checkbox.setText(
+            "High-Impact Only (on)" if self.high_impact_only_checkbox.isChecked() else "High-Impact Only"
+        )
+
+    def _on_high_impact_filter_toggled(self, _checked: bool) -> None:
+        self._sync_filter_button_labels()
+        self._update_message_list()
+
+    def _infer_store_current_groups(self) -> None:
+        if self.sender_categorization and self.current_groups:
+            self.sender_categorization.infer_and_store_groups(self.current_groups)
+        self._update_message_list()
+
+    def _rebuild_inferred_categories(self) -> None:
+        """Clear all inferred sender/domain scores and recompute from current groups (keeps manual overrides)."""
+        if not self.sender_categorization or not self.current_groups:
+            self._update_message_list()
+            return
+        self.sender_categorization.clear_all_inferred_categories()
+        self.sender_categorization.infer_and_store_groups(self.current_groups)
+        self._update_message_list()
+
     def _open_sender_categorization(self):
         """Open sender recategorization window."""
         if not self.sender_categorization:
@@ -1248,6 +1302,7 @@ class MainWindow(SmartMainWindow):
         if self.sender_categorization_window is None:
             self.sender_categorization_window = SenderCategorizationWindow(
                 manager=self.sender_categorization,
+                on_reinfer=self._rebuild_inferred_categories,
                 parent=self,
             )
         self.sender_categorization_window.show()

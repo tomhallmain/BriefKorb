@@ -4,7 +4,7 @@ Sender impact recategorization window.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Callable, Optional
 
 from PySide6.QtWidgets import (
     QWidget,
@@ -28,7 +28,12 @@ from email_client.utils.sender_categorization import (
 class SenderCategorizationWindow(SmartWindow):
     """Modeless window for reviewing inferred sender impact and applying exceptions."""
 
-    def __init__(self, manager: SenderCategorizationManager, parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        manager: SenderCategorizationManager,
+        parent: Optional[QWidget] = None,
+        on_reinfer: Optional[Callable[[], None]] = None,
+    ):
         super().__init__(
             persistent_parent=parent,
             position_parent=parent,
@@ -37,6 +42,7 @@ class SenderCategorizationWindow(SmartWindow):
             center=True,
         )
         self.manager = manager
+        self.on_reinfer = on_reinfer
         self._init_ui()
         self._refresh_records()
 
@@ -67,6 +73,14 @@ class SenderCategorizationWindow(SmartWindow):
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self._refresh_records)
         controls.addWidget(self.refresh_btn)
+
+        self.rebuild_btn = QPushButton("Clear inferred & rebuild…")
+        self.rebuild_btn.setToolTip(
+            "Removes all machine-inferred sender/domain scores, then recomputes from the "
+            "current message list. Manual overrides are kept."
+        )
+        self.rebuild_btn.clicked.connect(self._on_rebuild_inferred)
+        controls.addWidget(self.rebuild_btn)
         controls.addStretch()
         root.addLayout(controls)
 
@@ -84,6 +98,17 @@ class SenderCategorizationWindow(SmartWindow):
             self.sender_list.addItem(item)
         self.summary_label.setText(f"{len(self.records)} sender(s) tracked; ⚠ indicates manual exception.")
         self._update_details()
+
+    def _on_rebuild_inferred(self) -> None:
+        if self.on_reinfer is None:
+            QMessageBox.information(
+                self,
+                "Sender Categorization",
+                "Rebuild is only available from the main window when messages are loaded.",
+            )
+            return
+        self.on_reinfer()
+        self._refresh_records()
 
     def _selected_sender(self) -> Optional[str]:
         item = self.sender_list.currentItem()
@@ -108,13 +133,21 @@ class SenderCategorizationWindow(SmartWindow):
             return
         confidence = record["confidence"]
         confidence_text = f"{confidence:.2f}" if isinstance(confidence, (int, float)) else "n/a"
+        trace = record.get("decision_trace") or []
+        trace_text = "\n".join(f"  • {t}" for t in trace[:24]) if trace else "n/a"
         self.detail_label.setText(
             f"Sender: {record['sender']}\n"
             f"Domain: {record['domain'] or 'n/a'}\n"
             f"Effective impact: {record['impact']} ({record['source']})\n"
             f"Inferred impact: {record['inferred_impact']}\n"
             f"Reason: {record['reason'] or 'n/a'}\n"
-            f"Confidence: {confidence_text}"
+            f"Confidence: {confidence_text}\n"
+            f"Scores: generic={float(record.get('generic_inference_score') or 0):.2f} "
+            f"blocklist={float(record.get('blocklist_inference_score') or 0):.2f} "
+            f"bot_spam={float(record.get('bot_spam_inference_score') or 0):.2f}\n"
+            f"Decision trace (last run):\n{trace_text}\n"
+            f"Audit log: use SenderCategorizationManager.get_inference_audit_tail() "
+            f"(cache key {self.manager.INFERENCE_AUDIT_KEY!r})."
         )
 
     def _apply_exception(self) -> None:
