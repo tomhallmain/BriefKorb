@@ -1,5 +1,8 @@
 """
 Sender/group impact categorization framework backed by encrypted app cache.
+
+TODO: Parse the user's junk folder to add a second-opinion spam signal from
+provider-classified junk mail before finalizing bot/spam inference decisions.
 """
 
 from __future__ import annotations
@@ -7,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from email.utils import parseaddr
+import re
 from typing import Any, Dict, Iterable, List
 
 from email_server.utils.app_info_cache import get_app_info_cache
@@ -26,6 +31,7 @@ class ImpactInference:
     confidence: float
     generic_inference_score: float = 0.0
     blocklist_inference_score: float = 0.0
+    bot_spam_inference_score: float = 0.0
 
 
 class SenderCategorizationManager:
@@ -99,6 +105,7 @@ class SenderCategorizationManager:
             "confidence": inference.confidence,
             "generic_inference_score": inference.generic_inference_score,
             "blocklist_inference_score": inference.blocklist_inference_score,
+            "bot_spam_inference_score": inference.bot_spam_inference_score,
             "source": "inferred",
             "updated_at": self._now(),
         }
@@ -114,6 +121,7 @@ class SenderCategorizationManager:
             "confidence": inference.confidence,
             "generic_inference_score": inference.generic_inference_score,
             "blocklist_inference_score": inference.blocklist_inference_score,
+            "bot_spam_inference_score": inference.bot_spam_inference_score,
             "source": "inferred",
             "updated_at": self._now(),
         }
@@ -123,17 +131,26 @@ class SenderCategorizationManager:
     def infer_for_group(self, group: MessageGroup) -> ImpactInference:
         sender = group.sender_email.lower()
         domain = group.sender_domain.lower()
+        display_name, _ = parseaddr(group.messages[0].sender) if group.messages else ("", "")
         subjects = [((m.subject or "").lower()) for m in group.messages[:5]]
-        haystack = " ".join(subjects)
-        return self._infer_from_sender_data(sender, domain, haystack)
+        bodies = [((m.body or "").lower()) for m in group.messages[:3]]
+        haystack = " ".join(subjects + bodies)
+        return self._infer_from_sender_data(sender, domain, haystack, display_name)
 
-    def infer_for_sender(self, sender_email: str, subjects: List[str]) -> ImpactInference:
+    def infer_for_sender(
+        self,
+        sender_email: str,
+        subjects: List[str],
+        display_name: str = "",
+        content_samples: List[str] | None = None,
+    ) -> ImpactInference:
         sender = sender_email.lower().strip()
         domain = sender.split("@")[1].lower() if "@" in sender else sender
-        haystack = " ".join((s or "").lower() for s in subjects[:5])
-        return self._infer_from_sender_data(sender, domain, haystack)
+        content_samples = content_samples or []
+        haystack = " ".join((s or "").lower() for s in (subjects[:5] + content_samples[:3]))
+        return self._infer_from_sender_data(sender, domain, haystack, display_name)
 
-    def _infer_from_sender_data(self, sender: str, domain: str, haystack: str) -> ImpactInference:
+    def _infer_from_sender_data(self, sender: str, domain: str, haystack: str, display_name: str = "") -> ImpactInference:
         low_impact_domains = ("news", "mailer", "marketing", "promotions", "updates")
         low_impact_terms = ("unsubscribe", "sale", "offer", "sponsored", "promo")
         high_impact_terms = (
@@ -165,6 +182,7 @@ class SenderCategorizationManager:
 
         generic_score = max(high_generic_score, low_generic_score)
         blocklist_score = self._score_blocklist_evidence(sender, domain)
+        bot_spam_score, bot_reason = self._score_bot_spam_evidence(sender, domain, haystack, display_name)
 
         if blocklist_score >= 0.7:
             confidence = max(0.75, blocklist_score)
@@ -174,6 +192,17 @@ class SenderCategorizationManager:
                 confidence,
                 generic_score,
                 blocklist_score,
+                bot_spam_score,
+            )
+        if bot_spam_score >= 0.65:
+            confidence = max(0.7, bot_spam_score)
+            return ImpactInference(
+                ImpactLevel.LOW_IMPACT,
+                bot_reason,
+                confidence,
+                generic_score,
+                blocklist_score,
+                bot_spam_score,
             )
         if high_generic_score >= 0.7 and high_generic_score > low_generic_score:
             return ImpactInference(
@@ -182,6 +211,7 @@ class SenderCategorizationManager:
                 high_generic_score,
                 generic_score,
                 blocklist_score,
+                bot_spam_score,
             )
         if low_generic_score >= 0.6:
             return ImpactInference(
@@ -190,6 +220,7 @@ class SenderCategorizationManager:
                 low_generic_score,
                 generic_score,
                 blocklist_score,
+                bot_spam_score,
             )
         return ImpactInference(
             ImpactLevel.UNCLASSIFIED,
@@ -197,7 +228,53 @@ class SenderCategorizationManager:
             0.0,
             generic_score,
             blocklist_score,
+            bot_spam_score,
         )
+
+    def _score_bot_spam_evidence(self, sender: str, domain: str, haystack: str, display_name: str) -> tuple[float, str]:
+        score = 0.0
+        reasons: List[str] = []
+
+        local_part = sender.split("@", 1)[0] if "@" in sender else sender
+        compact_local = re.sub(r"[^a-z0-9]", "", local_part.lower())
+        if len(compact_local) >= 22:
+            score += 0.35
+            reasons.append("very long randomized local-part")
+        digit_ratio = (sum(1 for ch in compact_local if ch.isdigit()) / len(compact_local)) if compact_local else 0.0
+        if digit_ratio >= 0.25:
+            score += 0.25
+            reasons.append("high digit ratio in sender local-part")
+        unique_ratio = (len(set(compact_local)) / len(compact_local)) if compact_local else 0.0
+        if len(compact_local) >= 14 and unique_ratio >= 0.75:
+            score += 0.2
+            reasons.append("high character randomness in sender local-part")
+
+        if display_name:
+            display_tokens = set(re.findall(r"[a-z]{3,}", display_name.lower()))
+            sender_tokens = set(re.findall(r"[a-z]{3,}", f"{local_part}.{domain}"))
+            meaningful_display_tokens = {
+                token for token in display_tokens
+                if token not in {"team", "support", "service", "mail", "notice", "notifications"}
+            }
+            if meaningful_display_tokens and meaningful_display_tokens.isdisjoint(sender_tokens):
+                score += 0.3
+                reasons.append("display-name and sender address mismatch")
+
+        non_ascii_chars = sum(1 for ch in haystack if ord(ch) > 127)
+        total_chars = len(haystack)
+        non_ascii_ratio = (non_ascii_chars / total_chars) if total_chars else 0.0
+        if non_ascii_ratio >= 0.12 and non_ascii_chars >= 6:
+            score += 0.25
+            reasons.append("unexpected unicode ratio in message content")
+
+        if "http://" in haystack and "verify" in haystack:
+            score += 0.15
+            reasons.append("suspicious verification URL pattern")
+
+        score = min(1.0, score)
+        if reasons:
+            return score, "; ".join(reasons)
+        return score, "insufficient bot/spam evidence"
 
     def _score_blocklist_evidence(self, sender: str, domain: str) -> float:
         blocked_senders = self._cache.get(self.BLOCKED_SENDERS_KEY, [])
@@ -262,6 +339,7 @@ class SenderCategorizationManager:
                     "confidence": effective.get("confidence"),
                     "generic_inference_score": inferred.get("generic_inference_score", 0.0),
                     "blocklist_inference_score": inferred.get("blocklist_inference_score", 0.0),
+                    "bot_spam_inference_score": inferred.get("bot_spam_inference_score", 0.0),
                     "has_exception": sender in exceptions,
                     "inferred_impact": inferred.get("impact", ImpactLevel.UNCLASSIFIED.value),
                 }

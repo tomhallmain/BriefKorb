@@ -103,3 +103,31 @@ def test_scores_are_persisted_in_sender_records(fake_cache: FakeCache) -> None:
     record = next(r for r in manager.list_sender_records() if r["sender"] == sender)
     assert record["generic_inference_score"] == pytest.approx(inference.generic_inference_score)
     assert record["blocklist_inference_score"] == pytest.approx(inference.blocklist_inference_score)
+    assert record["bot_spam_inference_score"] == pytest.approx(inference.bot_spam_inference_score)
+
+
+def test_bot_spam_randomized_sender_and_unicode_content(fake_cache: FakeCache) -> None:
+    manager = SenderCategorizationManager(storage_path="ignored")
+
+    inference = manager.infer_for_sender(
+        "x7q9vz3m1n8k4p2r6t5b0c9f@safe-mail.example",
+        ["Your account update"],
+        display_name="Trusted Payroll Team",
+        content_samples=["urgent verify http://example.test 𝕏𝕐𝕫 ⚠️⚠️⚠️"],
+    )
+
+    assert inference.bot_spam_inference_score >= 0.65
+    assert inference.impact == ImpactLevel.LOW_IMPACT
+    assert "mismatch" in inference.reason or "randomized" in inference.reason
+
+
+def test_display_name_mismatch_increases_bot_spam_score(fake_cache: FakeCache) -> None:
+    manager = SenderCategorizationManager(storage_path="ignored")
+
+    inference = manager.infer_for_sender(
+        "noreply@notifications.example",
+        ["Monthly system summary"],
+        display_name="Bitcoin Recovery Desk",
+    )
+
+    assert inference.bot_spam_inference_score > 0.0
