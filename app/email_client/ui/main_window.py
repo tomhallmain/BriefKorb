@@ -197,6 +197,15 @@ class MainWindow(SmartMainWindow):
         )
         self.high_impact_only_checkbox.toggled.connect(self._on_high_impact_filter_toggled)
         filter_layout.addWidget(self.high_impact_only_checkbox)
+        self.suspected_spam_only_checkbox = QPushButton("Suspected Spam Only")
+        self.suspected_spam_only_checkbox.setCheckable(True)
+        self.suspected_spam_only_checkbox.setToolTip(
+            "Suspected bot/spam groups are hidden from the default list. When this is on, only those "
+            "groups are shown (last inference: low-impact from bot/spam heuristics). "
+            "Mutually exclusive with High-Impact Only."
+        )
+        self.suspected_spam_only_checkbox.toggled.connect(self._on_suspected_spam_filter_toggled)
+        filter_layout.addWidget(self.suspected_spam_only_checkbox)
         self.unread_only_checkbox.toggled.connect(self._sync_filter_button_labels)
         filter_layout.addStretch()
         layout.addLayout(filter_layout)
@@ -589,24 +598,41 @@ class MainWindow(SmartMainWindow):
         QMessageBox.critical(self, "Error Loading Messages", f"Failed to load messages:\n{error}")
     
     def _update_message_list(self):
-        """Update the message list widget to show message groups"""
+        """Update the message list widget to show message groups.
+
+        Suspected bot/spam groups (see ``SenderCategorizationManager.is_suspected_bot_spam_group``)
+        are omitted unless ``Suspected Spam Only`` is checked.
+        """
         self.message_list.clear()
         
         unread_only = self.unread_only_checkbox.isChecked()
         high_impact_only = self.high_impact_only_checkbox.isChecked()
-        
+        suspected_spam_only = self.suspected_spam_only_checkbox.isChecked()
+
         # Filter groups based on unread filter
         if unread_only:
             groups_to_show = [g for g in self.current_groups if g.unread_count > 0]
         else:
             groups_to_show = self.current_groups
 
+        if self.sender_categorization:
+            if suspected_spam_only:
+                groups_to_show = [
+                    g for g in groups_to_show
+                    if self.sender_categorization.is_suspected_bot_spam_group(g)
+                ]
+            else:
+                groups_to_show = [
+                    g for g in groups_to_show
+                    if not self.sender_categorization.is_suspected_bot_spam_group(g)
+                ]
+
         if high_impact_only and self.sender_categorization:
             groups_to_show = [
                 g for g in groups_to_show
                 if self.sender_categorization.is_high_impact_group(g)
             ]
-        
+
         # Add groups to list
         for group in groups_to_show:
             # Create display text for the group
@@ -1275,8 +1301,23 @@ class MainWindow(SmartMainWindow):
         self.high_impact_only_checkbox.setText(
             "High-Impact Only (on)" if self.high_impact_only_checkbox.isChecked() else "High-Impact Only"
         )
+        self.suspected_spam_only_checkbox.setText(
+            "Suspected Spam Only (on)" if self.suspected_spam_only_checkbox.isChecked() else "Suspected Spam Only"
+        )
 
-    def _on_high_impact_filter_toggled(self, _checked: bool) -> None:
+    def _on_high_impact_filter_toggled(self, checked: bool) -> None:
+        if checked and self.suspected_spam_only_checkbox.isChecked():
+            self.suspected_spam_only_checkbox.blockSignals(True)
+            self.suspected_spam_only_checkbox.setChecked(False)
+            self.suspected_spam_only_checkbox.blockSignals(False)
+        self._sync_filter_button_labels()
+        self._update_message_list()
+
+    def _on_suspected_spam_filter_toggled(self, checked: bool) -> None:
+        if checked and self.high_impact_only_checkbox.isChecked():
+            self.high_impact_only_checkbox.blockSignals(True)
+            self.high_impact_only_checkbox.setChecked(False)
+            self.high_impact_only_checkbox.blockSignals(False)
         self._sync_filter_button_labels()
         self._update_message_list()
 

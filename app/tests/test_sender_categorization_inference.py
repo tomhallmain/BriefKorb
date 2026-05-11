@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator
 
 import pytest
 
+from email_client.utils.content_type import ContentType
+from email_client.utils.message_grouping import MessageGroup
 from email_client.utils.sender_categorization import (
     ImpactInference,
     ImpactLevel,
     SenderCategorizationManager,
 )
 from email_client.utils.sender_categorization_rules import load_sender_categorization_rules
+from email_server import EmailMessage
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -152,6 +156,28 @@ def test_bot_spam_randomized_sender_and_unicode_content(fake_cache: FakeCache) -
     assert inference.bot_spam_inference_score >= 0.65
     assert inference.impact == ImpactLevel.LOW_IMPACT
     assert "mismatch" in inference.reason or "randomized" in inference.reason
+
+
+def test_is_suspected_bot_spam_group_matches_stored_inference(fake_cache: FakeCache) -> None:
+    manager = SenderCategorizationManager(storage_path="ignored")
+    msg = EmailMessage(
+        id="1",
+        subject="Your account update",
+        sender="Trusted Payroll Team <x7q9vz3m1n8k4p2r6t5b0c9f@safe-mail.example>",
+        recipients=["a@b.com"],
+        received_date=datetime.now(timezone.utc),
+        body="urgent verify http://example.test 𝕏𝕐𝕫 ⚠️⚠️⚠️",
+        is_read=False,
+        provider="test",
+    )
+    group = MessageGroup(
+        sender_email="x7q9vz3m1n8k4p2r6t5b0c9f@safe-mail.example",
+        sender_domain="safe-mail.example",
+        messages=[msg],
+        content_type=ContentType.UNCLASSIFIED,
+    )
+    manager.infer_and_store_groups([group])
+    assert manager.is_suspected_bot_spam_group(group)
 
 
 def test_substack_domain_classified_low_not_high(fake_cache: FakeCache) -> None:

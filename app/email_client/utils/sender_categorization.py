@@ -17,6 +17,10 @@ decrypted bundle (both gitignored) unless path env vars are set. Regenerate the
 
 TODO: Parse the user's junk folder to add a second-opinion spam signal from
 provider-classified junk mail before finalizing bot/spam inference decisions.
+
+TODO: Augment bot/spam scoring with mixed-script / homoglyph / confusable Unicode
+checks on sender addresses and message bodies (beyond the current non-ASCII ratio
+heuristic).
 """
 
 from __future__ import annotations
@@ -94,6 +98,22 @@ class SenderCategorizationManager:
 
     def is_high_impact_group(self, group: MessageGroup) -> bool:
         return self.is_high_impact_sender(group.sender_email)
+
+    def is_suspected_bot_spam_group(self, group: MessageGroup) -> bool:
+        """True if the last stored inference for this sender was low-impact due to bot/spam heuristics.
+
+        Manual impact exceptions hide the group from this filter (sender was explicitly reclassified).
+        """
+        sender = group.sender_email.lower().strip()
+        exceptions = self._get_dict(self.EXCEPTIONS_KEY)
+        if sender in exceptions:
+            return False
+        senders = self._get_dict(self.SENDERS_KEY)
+        rec = senders.get(sender, {})
+        if rec.get("impact") != ImpactLevel.LOW_IMPACT.value:
+            return False
+        trace = rec.get("decision_trace") or []
+        return isinstance(trace, list) and "decision:bot_spam_low" in trace
 
     def set_sender_exception(self, sender_email: str, impact: ImpactLevel, source: str = "manual_exception") -> None:
         sender = sender_email.lower().strip()
