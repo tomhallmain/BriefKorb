@@ -1,33 +1,8 @@
-"""
-Build the bundled encrypted sender-categorization rules blob.
+"""Write ``email_client/utils/data/sender_categorization_rules_default.enc``.
 
-Writes ``app/email_client/utils/data/sender_categorization_rules_default.enc``.
-
-Source resolution (first match wins):
-
-1. ``--input <path>`` — encrypt this file; also copies it to the **default**
-   plaintext snapshot (``sender_categorization_rules.default.json``, gitignored)
-   before encryption.
-
-2. Else if ``sender_categorization_rules.active.json`` exists under
-   ``email_client/utils/data/`` — copies **active → default** snapshot, then
-   encrypts from that snapshot (so the bundled blob matches your active rules).
-
-3. Else if ``sender_categorization_rules.default.json`` exists — encrypt that
-   snapshot only.
-
-``BRIEFKORB_SENDER_RULES_DEFAULT_JSON`` overrides the default snapshot path.
-
-Usage (repo root, ``app`` on PYTHONPATH):
-
-  python app/scripts/encrypt_default_sender_categorization_rules.py
-
-  python app/scripts/encrypt_default_sender_categorization_rules.py --input path/to/rules.json
-
-From ``app`` as cwd:
-
-  python scripts/encrypt_default_sender_categorization_rules.py
-"""
+``--input`` copies to the default snapshot then encrypts; else active.json ->
+default then encrypt; else default.json only. ``BRIEFKORB_SENDER_RULES_DEFAULT_JSON``
+overrides snapshot path. Run from ``app/`` or with ``app`` on ``PYTHONPATH``."""
 
 from __future__ import annotations
 

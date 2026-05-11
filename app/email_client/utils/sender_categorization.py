@@ -1,19 +1,4 @@
-"""
-Sender/group impact categorization framework backed by encrypted app cache.
-
-Each inference stores a ``decision_trace`` list on the sender record (see
-``list_sender_records`` / ``get_sender_decision_trace``). A rolling audit log
-of recent runs lives in the encrypted cache under ``INFERENCE_AUDIT_KEY``;
-inspect it with ``get_inference_audit_tail()`` from scripts or a REPL.
-
-Heuristic defaults ship as ``email_client/utils/data/sender_categorization_rules_default.enc``
-(symmetric key derived from the app identifier). If ``sender_categorization_rules.active.json`` under ``email_client/utils/data/``
-exists (or ``BRIEFKORB_SENDER_RULES_ACTIVE_JSON`` / ``BRIEFKORB_SENDER_RULES_JSON``),
-that file **replaces** bundled defaults entirely (no merge). On first run the app
-creates that file and ``sender_categorization_rules.default.json`` from the
-decrypted bundle (both gitignored) unless path env vars are set. Regenerate the
-``.enc`` with ``python app/scripts/encrypt_default_sender_categorization_rules.py``
-(see script docstring: active → default snapshot → encrypt).
+"""Sender impact inference; rules in ``sender_categorization_rules``; cache holds traces and audit log.
 
 TODO: Parse the user's junk folder to add a second-opinion spam signal from
 provider-classified junk mail before finalizing bot/spam inference decisions.
@@ -454,11 +439,7 @@ class SenderCategorizationManager:
         }
 
     def infer_and_store_groups(self, groups: Iterable[MessageGroup]) -> None:
-        """Persist inferred impact for all groups with a single cache write.
-
-        Per-group ``store()`` calls were very slow (full encrypt + disk each time)
-        after a refresh with many senders; batching keeps behavior equivalent.
-        """
+        """Infer all groups then one ``store()`` (batched)."""
         groups_list = list(groups)
         if not groups_list:
             return

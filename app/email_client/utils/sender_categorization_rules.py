@@ -1,35 +1,8 @@
 """Load sender impact heuristic marker lists.
 
-Bundled defaults are read from ``data/sender_categorization_rules_default.enc``
-(symmetric key derived from the app identifier).
+Env: ``BRIEFKORB_SENDER_RULES_ACTIVE_JSON``, ``BRIEFKORB_SENDER_RULES_JSON`` (legacy), ``BRIEFKORB_SENDER_RULES_DEFAULT_JSON``, ``BRIEFKORB_SENDER_RULES_DEFAULT_ENC``.
 
-If a **local active** JSON file exists, it is the sole source of rules (the
-encrypted bundle is not merged in). That keeps user-tuned rules independent of
-shipped defaults.
-
-Paths / environment:
-
-- ``data/sender_categorization_rules.active.json`` — optional local file
-  (gitignored). ``BRIEFKORB_SENDER_RULES_ACTIVE_JSON`` overrides its path.
-  ``BRIEFKORB_SENDER_RULES_JSON`` is a legacy alias for the same active path.
-
-- ``data/sender_categorization_rules.default.json`` — optional gitignored
-  snapshot used by the encrypt script before producing the ``.enc`` blob.
-  ``BRIEFKORB_SENDER_RULES_DEFAULT_JSON`` overrides its path.
-
-- ``promotional_local_markers`` — local-parts (before ``@``) that indicate bulk
-  mail; generic high-impact scores from financial/subject noise are capped
-  unless a high-security phrase matched in the message text.
-
-- ``BRIEFKORB_SENDER_RULES_DEFAULT_ENC`` — alternate path to the encrypted
-  defaults file (used only when no active JSON is present).
-
-On first load (when using the built-in paths above and no path env overrides),
-missing ``active.json`` / ``default.json`` are created under ``data/`` from the
-decrypted bundle so you can edit them locally (both remain gitignored).
-
-Tests / automation: set ``BRIEFKORB_SKIP_SENDER_RULES_FILE_BOOTSTRAP=1`` to
-disable creating those files.
+Bootstrap writes missing ``active.json`` / ``default.json`` from the bundle unless ``BRIEFKORB_SKIP_SENDER_RULES_FILE_BOOTSTRAP`` is set.
 """
 
 from __future__ import annotations
@@ -184,7 +157,7 @@ def _resolve_active_json_path(rules_path: Path | None) -> Path:
 
 
 def bundled_default_json_path() -> Path:
-    """Path to the gitignored plaintext snapshot used when building the ``.enc`` blob."""
+    """Plaintext snapshot path for the encrypt script."""
     env_path = os.environ.get("BRIEFKORB_SENDER_RULES_DEFAULT_JSON", "").strip()
     return Path(env_path) if env_path else _DEFAULT_JSON_PATH
 
@@ -193,7 +166,7 @@ def load_sender_categorization_rules(
     *,
     rules_path: Path | None = None,
 ) -> SenderCategorizationRules:
-    """Load rules from active JSON if that file exists; otherwise from encrypted defaults."""
+    """Active JSON if present, else decrypted bundle."""
 
     if rules_path is None:
         _bootstrap_local_rule_snapshots_if_allowed()
