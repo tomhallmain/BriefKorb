@@ -173,6 +173,16 @@ def test_financial_noreply_still_high_impact(fake_cache: FakeCache) -> None:
     assert inference.impact == ImpactLevel.HIGH_IMPACT
 
 
+def test_newsletter_local_part_low_impact_despite_financial_marketing_copy(fake_cache: FakeCache) -> None:
+    manager = SenderCategorizationManager(storage_path="ignored")
+    inference = manager.infer_for_sender(
+        "newsletter@x.com",
+        ["Compare the best credit card offers and rewards this week"],
+    )
+    assert inference.impact == ImpactLevel.LOW_IMPACT
+    assert any("promotional_local_part" in t for t in inference.decision_trace)
+
+
 def test_personal_mac_mailbox_inclusion(fake_cache: FakeCache) -> None:
     manager = SenderCategorizationManager(storage_path="ignored")
     inference = manager.infer_for_sender(

@@ -17,6 +17,10 @@ Paths / environment:
   snapshot used by the encrypt script before producing the ``.enc`` blob.
   ``BRIEFKORB_SENDER_RULES_DEFAULT_JSON`` overrides its path.
 
+- ``promotional_local_markers`` — local-parts (before ``@``) that indicate bulk
+  mail; generic high-impact scores from financial/subject noise are capped
+  unless a high-security phrase matched in the message text.
+
 - ``BRIEFKORB_SENDER_RULES_DEFAULT_ENC`` — alternate path to the encrypted
   defaults file (used only when no active JSON is present).
 
@@ -56,6 +60,7 @@ _RULE_KEYS = (
     "financial_inclusion_markers",
     "personal_mailbox_domains",
     "automation_local_markers",
+    "promotional_local_markers",
     "low_impact_domain_parts",
     "low_impact_subject_terms",
 )
@@ -69,6 +74,7 @@ class SenderCategorizationRules:
     financial_inclusion_markers: Tuple[str, ...]
     personal_mailbox_domains: Tuple[str, ...]
     automation_local_markers: Tuple[str, ...]
+    promotional_local_markers: Tuple[str, ...]
     low_impact_domain_parts: Tuple[str, ...]
     low_impact_subject_terms: Tuple[str, ...]
 
@@ -159,6 +165,7 @@ def _rules_from_rule_dict(data: dict[str, Any]) -> SenderCategorizationRules:
         financial_inclusion_markers=merged["financial_inclusion_markers"],
         personal_mailbox_domains=merged["personal_mailbox_domains"],
         automation_local_markers=merged["automation_local_markers"],
+        promotional_local_markers=merged["promotional_local_markers"],
         low_impact_domain_parts=merged["low_impact_domain_parts"],
         low_impact_subject_terms=merged["low_impact_subject_terms"],
     )

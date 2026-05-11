@@ -255,8 +255,10 @@ class SenderCategorizationManager:
         high_generic_score = 0.0
         low_generic_score = 0.0
         generic_reason = "insufficient confidence"
+        local_part = sender.split("@", 1)[0].lower() if "@" in sender else sender.lower()
 
-        if any(term in hl for term in self._rules.high_security_markers):
+        had_high_security_signal = any(term in hl for term in self._rules.high_security_markers)
+        if had_high_security_signal:
             high_generic_score = 0.8
             generic_reason = "contains account/security markers"
             trace.append("signal:high_security_markers")
@@ -279,10 +281,24 @@ class SenderCategorizationManager:
             low_generic_score = max(low_generic_score, 0.65)
             generic_reason = "sender domain resembles marketing/bulk sender"
             trace.append("signal:marketing_domain_shape")
-        elif any(m in sender_l for m in self._rules.automation_local_markers) and high_generic_score < 0.65 and not fin_hit:
+        elif (
+            any(m in local_part for m in self._rules.automation_local_markers)
+            and high_generic_score < 0.65
+            and not fin_hit
+        ):
             low_generic_score = max(low_generic_score, 0.6)
             generic_reason = "automated sender address without strong account signals"
             trace.append("signal:automation_local_part")
+
+        if (
+            self._rules.promotional_local_markers
+            and any(p in local_part for p in self._rules.promotional_local_markers)
+            and not had_high_security_signal
+        ):
+            low_generic_score = max(low_generic_score, 0.73)
+            generic_reason = "newsletter or promotional-style sender local-part"
+            trace.append("signal:promotional_local_part")
+            high_generic_score = min(high_generic_score, 0.58)
 
         generic_score = max(high_generic_score, low_generic_score)
         trace.append(

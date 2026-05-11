@@ -115,11 +115,11 @@ def main() -> None:
     if args.input is not None:
         shutil.copy2(source, default_snapshot)
         encrypt_from = default_snapshot
-        print(f"Updated default snapshot from --input → {default_snapshot}")
+        print(f"Updated default snapshot from --input -> {default_snapshot}")
     elif source.resolve() == LOCAL_ACTIVE_RULES_JSON.resolve():
         shutil.copy2(source, default_snapshot)
         encrypt_from = default_snapshot
-        print(f"Updated default snapshot from active JSON → {default_snapshot}")
+        print(f"Updated default snapshot from active JSON -> {default_snapshot}")
     else:
         encrypt_from = source
 
