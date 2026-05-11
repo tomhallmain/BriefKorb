@@ -20,6 +20,7 @@ def _require_bundled_encrypted_sender_rules() -> Iterator[None]:
     """Force decrypt path only: ignore env + local active.json so tests match shipped defaults."""
     mp = pytest.MonkeyPatch()
     try:
+        mp.setenv("BRIEFKORB_SKIP_SENDER_RULES_FILE_BOOTSTRAP", "1")
         mp.delenv("BRIEFKORB_SENDER_RULES_ACTIVE_JSON", raising=False)
         mp.delenv("BRIEFKORB_SENDER_RULES_JSON", raising=False)
         import email_client.utils.sender_categorization_rules as scr

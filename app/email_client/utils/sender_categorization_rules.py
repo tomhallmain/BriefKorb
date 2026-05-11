@@ -19,6 +19,13 @@ Paths / environment:
 
 - ``BRIEFKORB_SENDER_RULES_DEFAULT_ENC`` — alternate path to the encrypted
   defaults file (used only when no active JSON is present).
+
+On first load (when using the built-in paths above and no path env overrides),
+missing ``active.json`` / ``default.json`` are created under ``data/`` from the
+decrypted bundle so you can edit them locally (both remain gitignored).
+
+Tests / automation: set ``BRIEFKORB_SKIP_SENDER_RULES_FILE_BOOTSTRAP=1`` to
+disable creating those files.
 """
 
 from __future__ import annotations
@@ -95,6 +102,46 @@ def _load_bundled_encrypted_defaults() -> dict[str, Any]:
     return {k: v for k, v in data.items() if not str(k).startswith("_")}
 
 
+def _bootstrap_local_rule_snapshots_if_allowed() -> None:
+    """Create gitignored active/default JSON from the bundled .enc when missing."""
+    if os.environ.get("BRIEFKORB_SKIP_SENDER_RULES_FILE_BOOTSTRAP", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return
+    if os.environ.get("BRIEFKORB_SENDER_RULES_ACTIVE_JSON", "").strip():
+        return
+    if os.environ.get("BRIEFKORB_SENDER_RULES_JSON", "").strip():
+        return
+    if os.environ.get("BRIEFKORB_SENDER_RULES_DEFAULT_JSON", "").strip():
+        return
+
+    bundled = _load_bundled_encrypted_defaults()
+    if not bundled:
+        return
+
+    body: dict[str, Any] = {}
+    for key in _RULE_KEYS:
+        v = bundled.get(key)
+        body[key] = list(v) if isinstance(v, list) else []
+
+    doc = {
+        "_comment": (
+            "Auto-generated from bundled defaults on first rules load. "
+            "Edit active.json; run encrypt_default_sender_categorization_rules.py before committing a new .enc."
+        ),
+        **body,
+    }
+    text = json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
+    _DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    if not _ACTIVE_JSON_PATH.is_file():
+        _ACTIVE_JSON_PATH.write_text(text, encoding="utf-8")
+    if not _DEFAULT_JSON_PATH.is_file():
+        _DEFAULT_JSON_PATH.write_text(text, encoding="utf-8")
+
+
 def _as_markers(value: Any) -> Tuple[str, ...]:
     if not isinstance(value, list):
         return ()
@@ -140,6 +187,9 @@ def load_sender_categorization_rules(
     rules_path: Path | None = None,
 ) -> SenderCategorizationRules:
     """Load rules from active JSON if that file exists; otherwise from encrypted defaults."""
+
+    if rules_path is None:
+        _bootstrap_local_rule_snapshots_if_allowed()
 
     active_path = _resolve_active_json_path(rules_path)
     if active_path.is_file():

@@ -7,12 +7,13 @@ of recent runs lives in the encrypted cache under ``INFERENCE_AUDIT_KEY``;
 inspect it with ``get_inference_audit_tail()`` from scripts or a REPL.
 
 Heuristic defaults ship as ``email_client/utils/data/sender_categorization_rules_default.enc``
-(symmetric key derived from the app identifier). If
-``email_client/utils/data/sender_categorization_rules.active.json`` exists (or
-``BRIEFKORB_SENDER_RULES_ACTIVE_JSON`` / ``BRIEFKORB_SENDER_RULES_JSON``), that
-file **replaces** bundled defaults entirely (no merge). Regenerate the ``.enc``
-with ``python app/scripts/encrypt_default_sender_categorization_rules.py`` (see
-script docstring: active → default snapshot → encrypt).
+(symmetric key derived from the app identifier). If ``sender_categorization_rules.active.json`` under ``email_client/utils/data/``
+exists (or ``BRIEFKORB_SENDER_RULES_ACTIVE_JSON`` / ``BRIEFKORB_SENDER_RULES_JSON``),
+that file **replaces** bundled defaults entirely (no merge). On first run the app
+creates that file and ``sender_categorization_rules.default.json`` from the
+decrypted bundle (both gitignored) unless path env vars are set. Regenerate the
+``.enc`` with ``python app/scripts/encrypt_default_sender_categorization_rules.py``
+(see script docstring: active → default snapshot → encrypt).
 
 TODO: Parse the user's junk folder to add a second-opinion spam signal from
 provider-classified junk mail before finalizing bot/spam inference decisions.
