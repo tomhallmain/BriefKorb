@@ -9,6 +9,7 @@ from email.utils import parseaddr
 import re
 
 from email_server import EmailMessage
+from email_server.utils.datetime_compat import normalize_received_at_utc
 from .content_type import ContentType
 
 
@@ -72,6 +73,7 @@ def group_messages_by_sender(messages: List[EmailMessage]) -> List[MessageGroup]
     groups_dict: Dict[str, List[EmailMessage]] = {}
     
     for message in messages:
+        message.received_date = normalize_received_at_utc(message.received_date)
         sender_email = extract_sender_email(message.sender)
         if sender_email not in groups_dict:
             groups_dict[sender_email] = []

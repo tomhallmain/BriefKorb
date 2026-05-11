@@ -11,6 +11,7 @@ from datetime import datetime
 from dataclasses import dataclass
 from .config import EmailServerConfig, create_default_config
 from .utils.logger import setup_logger
+from .utils.datetime_compat import normalize_received_at_utc
 from .auth import TokenManager
 
 # Set up logger
@@ -309,7 +310,10 @@ class UnifiedEmailServer:
                 logger.info(f"Retrieved {len(provider_messages)} messages from {auth_prov.provider_name} for user {auth_prov.user_id}")
             except Exception as e:
                 logger.error(f"Failed to get messages from {auth_prov.provider_name} for user {auth_prov.user_id}: {e}")
-        
+
+        for m in messages:
+            m.received_date = normalize_received_at_utc(m.received_date)
+
         return sorted(messages, key=lambda x: x.received_date, reverse=True)
     
     def send_message(self,

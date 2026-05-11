@@ -3,7 +3,7 @@ Gmail API provider implementation
 """
 
 from typing import List, Optional, Union, Dict
-from datetime import datetime
+from datetime import datetime, timezone
 import base64
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -13,6 +13,7 @@ from ... import EmailProvider, EmailMessage
 from ...auth.gmail import GmailOAuth
 from ...auth import TokenManager
 from ...utils.logger import setup_logger
+from ...utils.datetime_compat import normalize_received_at_utc
 
 # Set up logger
 logger = setup_logger('email_server.providers.gmail')
@@ -129,9 +130,10 @@ class GmailProvider(EmailProvider):
                     except (ValueError, TypeError) as e:
                         # Fallback to current time if parsing fails
                         logger.warning(f"Could not parse date '{date_str}': {e}, using current time")
-                        received_date = datetime.now()
+                        received_date = datetime.now(timezone.utc)
                 else:
-                    received_date = datetime.now()
+                    received_date = datetime.now(timezone.utc)
+                received_date = normalize_received_at_utc(received_date)
                 
                 # Get message body - prefer HTML over plain text
                 body = ''
