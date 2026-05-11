@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
-from typing import Any, Dict
+from pathlib import Path
+from typing import Any, Dict, Iterator
 
 import pytest
 
@@ -10,6 +12,34 @@ from email_client.utils.sender_categorization import (
     ImpactLevel,
     SenderCategorizationManager,
 )
+from email_client.utils.sender_categorization_rules import load_sender_categorization_rules
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _require_bundled_encrypted_sender_rules() -> Iterator[None]:
+    """Force decrypt path only: ignore env + local active.json so tests match shipped defaults."""
+    mp = pytest.MonkeyPatch()
+    try:
+        mp.delenv("BRIEFKORB_SENDER_RULES_ACTIVE_JSON", raising=False)
+        mp.delenv("BRIEFKORB_SENDER_RULES_JSON", raising=False)
+        import email_client.utils.sender_categorization_rules as scr
+
+        mp.setattr(
+            scr,
+            "_ACTIVE_JSON_PATH",
+            Path("/__briefkorb_tests_no_active_json__/sender_rules.active.json"),
+        )
+        rules = load_sender_categorization_rules()
+        if not rules.bulk_domain_markers or not rules.high_security_markers:
+            pytest.fail(
+                "Bundled encrypted sender rules missing or failed to decrypt. "
+                "Build app/email_client/utils/data/sender_categorization_rules_default.enc with:\n"
+                "  python app/scripts/encrypt_default_sender_categorization_rules.py\n"
+                "(from repo root with app on PYTHONPATH, or from app/ per script docstring.)"
+            )
+        yield
+    finally:
+        mp.undo()
 
 
 @dataclass
@@ -162,3 +192,26 @@ def test_display_name_mismatch_increases_bot_spam_score(fake_cache: FakeCache) -
     )
 
     assert inference.bot_spam_inference_score > 0.0
+
+
+def test_rules_path_uses_only_that_json_not_encrypted_defaults(tmp_path: Path) -> None:
+    """When an active rules file is provided, bundled .enc is not consulted."""
+    path = tmp_path / "rules.json"
+    path.write_text(
+        json.dumps(
+            {
+                "bulk_domain_markers": ["unique-bulk-test.example"],
+                "bulk_subject_markers": [],
+                "high_security_markers": [],
+                "financial_inclusion_markers": [],
+                "personal_mailbox_domains": [],
+                "automation_local_markers": [],
+                "low_impact_domain_parts": [],
+                "low_impact_subject_terms": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    rules = load_sender_categorization_rules(rules_path=path)
+    assert rules.bulk_domain_markers == ("unique-bulk-test.example",)
+    assert rules.high_security_markers == ()

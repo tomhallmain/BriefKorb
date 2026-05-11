@@ -32,7 +32,7 @@ class SenderCategorizationWindow(SmartWindow):
         self,
         manager: SenderCategorizationManager,
         parent: Optional[QWidget] = None,
-        on_reinfer: Optional[Callable[[], None]] = None,
+        on_reinfer: Optional[Callable[[], Optional[bool]]] = None,
     ):
         super().__init__(
             persistent_parent=parent,
@@ -74,10 +74,11 @@ class SenderCategorizationWindow(SmartWindow):
         self.refresh_btn.clicked.connect(self._refresh_records)
         controls.addWidget(self.refresh_btn)
 
-        self.rebuild_btn = QPushButton("Clear inferred & rebuild…")
+        self.rebuild_btn = QPushButton("Clear inferred & rebuild...")
         self.rebuild_btn.setToolTip(
             "Removes all machine-inferred sender/domain scores, then recomputes from the "
-            "current message list. Manual overrides are kept."
+            "current message list. Manual overrides are kept. "
+            "If no mail is loaded yet, you can still clear stale inference from the cache."
         )
         self.rebuild_btn.clicked.connect(self._on_rebuild_inferred)
         controls.addWidget(self.rebuild_btn)
@@ -107,7 +108,17 @@ class SenderCategorizationWindow(SmartWindow):
                 "Rebuild is only available from the main window when messages are loaded.",
             )
             return
-        self.on_reinfer()
+        try:
+            ran = self.on_reinfer()
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Rebuild failed",
+                str(exc),
+            )
+            return
+        if ran is False:
+            return
         self._refresh_records()
 
     def _selected_sender(self) -> Optional[str]:
@@ -146,8 +157,8 @@ class SenderCategorizationWindow(SmartWindow):
             f"blocklist={float(record.get('blocklist_inference_score') or 0):.2f} "
             f"bot_spam={float(record.get('bot_spam_inference_score') or 0):.2f}\n"
             f"Decision trace (last run):\n{trace_text}\n"
-            f"Audit log: use SenderCategorizationManager.get_inference_audit_tail() "
-            f"(cache key {self.manager.INFERENCE_AUDIT_KEY!r})."
+            "Audit log: use SenderCategorizationManager.get_inference_audit_tail() "
+            f"(cache key '{self.manager.INFERENCE_AUDIT_KEY}')."
         )
 
     def _apply_exception(self) -> None:

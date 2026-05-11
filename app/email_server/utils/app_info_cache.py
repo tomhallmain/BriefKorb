@@ -343,5 +343,14 @@ def get_app_info_cache(storage_path: str | None = None) -> AppInfoCache:
     return _cache_instances[key]
 
 
-app_info_cache = get_app_info_cache()
+class _LazyDefaultAppInfoCache:
+    """Defer default cache open until first attribute access (import-safe for tests)."""
+
+    __slots__ = ()
+
+    def __getattr__(self, name: str):
+        return getattr(get_app_info_cache(), name)
+
+
+app_info_cache = _LazyDefaultAppInfoCache()
 # app_info_cache.enable_inflation_monitoring(True)

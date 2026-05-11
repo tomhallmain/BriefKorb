@@ -1285,14 +1285,34 @@ class MainWindow(SmartMainWindow):
             self.sender_categorization.infer_and_store_groups(self.current_groups)
         self._update_message_list()
 
-    def _rebuild_inferred_categories(self) -> None:
-        """Clear all inferred sender/domain scores and recompute from current groups (keeps manual overrides)."""
-        if not self.sender_categorization or not self.current_groups:
+    def _rebuild_inferred_categories(self) -> bool:
+        """Clear all inferred sender/domain scores and recompute from current groups (keeps manual overrides).
+
+        Returns True if cache was updated. When no groups are loaded, prompts to clear stale inference only.
+        """
+        if not self.sender_categorization:
+            return False
+        if not self.current_groups:
+            reply = QMessageBox.question(
+                self,
+                "Rebuild inference",
+                "No message groups are loaded in the main window, so scores cannot be recomputed from mail.\n\n"
+                "Clear all machine-inferred sender/domain data from the cache anyway? "
+                "(Manual overrides stay. Refresh mail afterward to fill inference again.)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return False
+            self.sender_categorization.clear_all_inferred_categories()
+            self.statusBar.showMessage("Cleared inferred sender categorization (reload mail to recompute).", 8000)
             self._update_message_list()
-            return
+            return True
         self.sender_categorization.clear_all_inferred_categories()
         self.sender_categorization.infer_and_store_groups(self.current_groups)
+        self.statusBar.showMessage("Rebuilt sender inference from loaded message groups.", 8000)
         self._update_message_list()
+        return True
 
     def _open_sender_categorization(self):
         """Open sender recategorization window."""

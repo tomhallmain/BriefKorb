@@ -14,6 +14,10 @@ app/oauth_settings.yml
 
 app_info_cache.enc*
 
+# Local sender impact rules (active runtime + plaintext snapshot for encrypt script)
+app/email_client/utils/data/sender_categorization_rules.active.json
+app/email_client/utils/data/sender_categorization_rules.default.json
+
 .claudeignore
 
 # Byte-compiled / optimized / DLL files

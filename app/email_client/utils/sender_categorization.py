@@ -6,6 +6,14 @@ Each inference stores a ``decision_trace`` list on the sender record (see
 of recent runs lives in the encrypted cache under ``INFERENCE_AUDIT_KEY``;
 inspect it with ``get_inference_audit_tail()`` from scripts or a REPL.
 
+Heuristic defaults ship as ``email_client/utils/data/sender_categorization_rules_default.enc``
+(symmetric key derived from the app identifier). If
+``email_client/utils/data/sender_categorization_rules.active.json`` exists (or
+``BRIEFKORB_SENDER_RULES_ACTIVE_JSON`` / ``BRIEFKORB_SENDER_RULES_JSON``), that
+file **replaces** bundled defaults entirely (no merge). Regenerate the ``.enc``
+with ``python app/scripts/encrypt_default_sender_categorization_rules.py`` (see
+script docstring: active → default snapshot → encrypt).
+
 TODO: Parse the user's junk folder to add a second-opinion spam signal from
 provider-classified junk mail before finalizing bot/spam inference decisions.
 """
@@ -21,6 +29,10 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 from email_server.utils.app_info_cache import get_app_info_cache
 from email_client.utils.message_grouping import MessageGroup
+from email_client.utils.sender_categorization_rules import (
+    SenderCategorizationRules,
+    load_sender_categorization_rules,
+)
 
 
 class ImpactLevel(str, Enum):
@@ -51,70 +63,9 @@ class SenderCategorizationManager:
     INFERENCE_AUDIT_KEY = "sender_impact_inference_audit_log"
     _AUDIT_MAX = 2000
 
-    # Domains / paths typical of newsletters, retail promos, or bulk civic mail (not account-critical).
-    _BULK_DOMAIN_MARKERS: Tuple[str, ...] = (
-        "substack.com",
-        "beehiiv.com",
-        "microcenter.com",
-        "flickr.com",
-        "tubitv.com",
-        "mail.house.gov",
-    )
-    _BULK_SUBJECT_MARKERS: Tuple[str, ...] = (
-        "here is what you need to know",
-        "weekly digest",
-    )
-    _HIGH_SECURITY_MARKERS: Tuple[str, ...] = (
-        "security alert",
-        "password reset",
-        "reset your password",
-        "two-factor",
-        "2fa",
-        "one-time code",
-        "authentication code",
-        "verification code",
-        "sign-in attempt",
-        "sign in attempt",
-        "unusual activity",
-        "suspicious activity",
-        "fraud alert",
-        "account locked",
-        "account action required",
-    )
-    _FINANCIAL_INCLUSION_MARKERS: Tuple[str, ...] = (
-        "payment due",
-        "minimum payment",
-        "payment received",
-        "payment posted",
-        "statement is available",
-        "statement available",
-        "credit card",
-        "autopay",
-        "account balance",
-        "overdraft",
-        "routing number",
-        "direct deposit",
-        "ach transfer",
-        "wire transfer",
-        "loan payment",
-        "mortgage payment",
-        "debit card",
-        "credit union",
-    )
-    _PERSONAL_MAILBOX_DOMAINS: Tuple[str, ...] = ("mac.com", "icloud.com", "me.com")
-    _AUTOMATION_LOCAL_MARKERS: Tuple[str, ...] = (
-        "noreply",
-        "no-reply",
-        "donotreply",
-        "mailer",
-        "bounces",
-        "newsletter",
-        "promo",
-        "notifications",
-    )
-
-    def __init__(self, storage_path: str):
+    def __init__(self, storage_path: str, *, rules: SenderCategorizationRules | None = None):
         self._cache = get_app_info_cache(storage_path)
+        self._rules = rules if rules is not None else load_sender_categorization_rules()
 
     def _get_dict(self, key: str) -> Dict[str, Dict[str, Any]]:
         value = self._cache.get(key, {})
@@ -223,27 +174,27 @@ class SenderCategorizationManager:
     def _bulk_newsletter_exclusion(self, sender: str, domain: str, haystack: str) -> Tuple[bool, str]:
         domain = domain.lower()
         hl = haystack.lower()
-        for marker in self._BULK_DOMAIN_MARKERS:
+        for marker in self._rules.bulk_domain_markers:
             if marker in domain:
                 return True, f"bulk/newsletter domain marker ({marker})"
-        for marker in self._BULK_SUBJECT_MARKERS:
+        for marker in self._rules.bulk_subject_markers:
             if marker in hl:
                 return True, f"bulk/newsletter subject marker ({marker})"
         return False, ""
 
     def _financial_inclusion(self, haystack: str) -> Tuple[bool, str]:
         hl = haystack.lower()
-        hits = [m for m in self._FINANCIAL_INCLUSION_MARKERS if m in hl]
+        hits = [m for m in self._rules.financial_inclusion_markers if m in hl]
         if hits:
             return True, f"financial/payment signals ({hits[0]})"
         return False, ""
 
     def _personal_mailbox_inclusion(self, sender: str, domain: str) -> Tuple[bool, str]:
         domain = domain.lower()
-        if domain not in self._PERSONAL_MAILBOX_DOMAINS:
+        if domain not in self._rules.personal_mailbox_domains:
             return False, ""
         local = sender.split("@", 1)[0].lower() if "@" in sender else sender.lower()
-        if any(m in local for m in self._AUTOMATION_LOCAL_MARKERS):
+        if any(m in local for m in self._rules.automation_local_markers):
             return False, ""
         return True, f"likely personal mailbox ({domain})"
 
@@ -298,13 +249,13 @@ class SenderCategorizationManager:
                 tuple(trace),
             )
 
-        low_impact_domains = ("news", "mailer", "marketing", "promotions", "updates")
-        low_impact_terms = ("unsubscribe", "sale", "offer", "sponsored", "promo", "limited time")
+        low_impact_domains = self._rules.low_impact_domain_parts
+        low_impact_terms = self._rules.low_impact_subject_terms
         high_generic_score = 0.0
         low_generic_score = 0.0
         generic_reason = "insufficient confidence"
 
-        if any(term in hl for term in self._HIGH_SECURITY_MARKERS):
+        if any(term in hl for term in self._rules.high_security_markers):
             high_generic_score = 0.8
             generic_reason = "contains account/security markers"
             trace.append("signal:high_security_markers")
@@ -327,7 +278,7 @@ class SenderCategorizationManager:
             low_generic_score = max(low_generic_score, 0.65)
             generic_reason = "sender domain resembles marketing/bulk sender"
             trace.append("signal:marketing_domain_shape")
-        elif any(m in sender_l for m in self._AUTOMATION_LOCAL_MARKERS) and high_generic_score < 0.65 and not fin_hit:
+        elif any(m in sender_l for m in self._rules.automation_local_markers) and high_generic_score < 0.65 and not fin_hit:
             low_generic_score = max(low_generic_score, 0.6)
             generic_reason = "automated sender address without strong account signals"
             trace.append("signal:automation_local_part")
