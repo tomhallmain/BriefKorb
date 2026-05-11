@@ -99,32 +99,14 @@ class SenderCategorizationManager:
             return
 
         senders = self._get_dict(self.SENDERS_KEY)
-        senders[sender] = {
-            "impact": inference.impact.value,
-            "reason": inference.reason,
-            "confidence": inference.confidence,
-            "generic_inference_score": inference.generic_inference_score,
-            "blocklist_inference_score": inference.blocklist_inference_score,
-            "bot_spam_inference_score": inference.bot_spam_inference_score,
-            "source": "inferred",
-            "updated_at": self._now(),
-        }
+        senders[sender] = self._inference_record(inference)
         self._cache.set(self.SENDERS_KEY, senders)
         self._cache.store()
 
     def set_inferred_group_impact(self, sender_domain: str, inference: ImpactInference) -> None:
         domain = sender_domain.lower().strip()
         groups = self._get_dict(self.GROUPS_KEY)
-        groups[domain] = {
-            "impact": inference.impact.value,
-            "reason": inference.reason,
-            "confidence": inference.confidence,
-            "generic_inference_score": inference.generic_inference_score,
-            "blocklist_inference_score": inference.blocklist_inference_score,
-            "bot_spam_inference_score": inference.bot_spam_inference_score,
-            "source": "inferred",
-            "updated_at": self._now(),
-        }
+        groups[domain] = self._inference_record(inference)
         self._cache.set(self.GROUPS_KEY, groups)
         self._cache.store()
 
@@ -313,11 +295,45 @@ class SenderCategorizationManager:
         domain_event_score = min(0.75, domain_event_count * 0.1)
         return max(score, sender_event_score, domain_event_score)
 
+    def _inference_record(self, inference: ImpactInference) -> Dict[str, Any]:
+        return {
+            "impact": inference.impact.value,
+            "reason": inference.reason,
+            "confidence": inference.confidence,
+            "generic_inference_score": inference.generic_inference_score,
+            "blocklist_inference_score": inference.blocklist_inference_score,
+            "bot_spam_inference_score": inference.bot_spam_inference_score,
+            "source": "inferred",
+            "updated_at": self._now(),
+        }
+
     def infer_and_store_groups(self, groups: Iterable[MessageGroup]) -> None:
-        for group in groups:
+        """Persist inferred impact for all groups with a single cache write.
+
+        Per-group ``store()`` calls were very slow (full encrypt + disk each time)
+        after a refresh with many senders; batching keeps behavior equivalent.
+        """
+        groups_list = list(groups)
+        if not groups_list:
+            return
+
+        senders = {k: dict(v) for k, v in self._get_dict(self.SENDERS_KEY).items()}
+        groups_by_domain = {k: dict(v) for k, v in self._get_dict(self.GROUPS_KEY).items()}
+        exceptions = self._get_dict(self.EXCEPTIONS_KEY)
+
+        for group in groups_list:
             inference = self.infer_for_group(group)
-            self.set_inferred_group_impact(group.sender_domain, inference)
-            self.set_inferred_sender_impact(group.sender_email, inference)
+            record = self._inference_record(inference)
+            domain = group.sender_domain.lower().strip()
+            groups_by_domain[domain] = dict(record)
+
+            sender = group.sender_email.lower().strip()
+            if sender not in exceptions:
+                senders[sender] = dict(record)
+
+        self._cache.set(self.SENDERS_KEY, senders, force=True)
+        self._cache.set(self.GROUPS_KEY, groups_by_domain, force=True)
+        self._cache.store()
 
     def list_sender_records(self) -> List[Dict[str, Any]]:
         senders = self._get_dict(self.SENDERS_KEY)

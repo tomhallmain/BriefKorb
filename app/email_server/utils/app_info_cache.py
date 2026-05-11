@@ -169,11 +169,11 @@ class AppInfoCache():
                 self._cache[AppInfoCache.DIRECTORIES_KEY] = {}
             return self._cache[AppInfoCache.DIRECTORIES_KEY]
 
-    def set(self, key, value):
+    def set(self, key, value, *, force: bool = False):
         with self._lock:
             if AppInfoCache.META_INFO_KEY not in self._cache:
                 self._cache[AppInfoCache.META_INFO_KEY] = {}
-            if self._has_changes or self._cache[AppInfoCache.META_INFO_KEY].get(key) != value:
+            if force or self._has_changes or self._cache[AppInfoCache.META_INFO_KEY].get(key) != value:
                 self._cache[AppInfoCache.META_INFO_KEY][key] = value
                 self._has_changes = True
 
