@@ -69,3 +69,26 @@ class MessageBodyWorkerThread(QThread):
             self.content_ready.emit(html)
         except Exception as e:
             self.error_occurred.emit(str(e))
+
+
+class EntityExtractionWorkerThread(QThread):
+    """Worker thread for entity extraction over a batch of messages.
+
+    Delegates to ``UnifiedEmailServer.extract_entities()`` so the graph
+    manager stays server-owned and the UI thread is never blocked.
+    """
+
+    extraction_complete = Signal(int)   # number of job postings found
+    error_occurred = Signal(str)
+
+    def __init__(self, server: UnifiedEmailServer, messages: List[EmailMessage]) -> None:
+        super().__init__()
+        self.server = server
+        self.messages = messages
+
+    def run(self) -> None:
+        try:
+            count = self.server.extract_entities(self.messages)
+            self.extraction_complete.emit(count)
+        except Exception as e:
+            self.error_occurred.emit(str(e))

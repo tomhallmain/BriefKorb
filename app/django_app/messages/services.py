@@ -61,6 +61,16 @@ class MessagesService:
         )
         self.blocked_sender_tracker = BlockedSenderTracker(self.config.token_storage_path)
         self.sender_categorization = SenderCategorizationManager(self.config.token_storage_path)
+        self.entity_graph_manager = self._init_entity_graph_manager(self.config.token_storage_path)
+
+    @staticmethod
+    def _init_entity_graph_manager(token_storage_path: str):
+        try:
+            import os
+            from entity_graph import EntityGraphManager
+            return EntityGraphManager(os.path.join(token_storage_path, "entity_graph"))
+        except Exception:
+            return None
     
     def _get_headers(self, timezone: Optional[str] = None) -> Dict[str, str]:
         """Get request headers with authentication token"""
@@ -204,6 +214,17 @@ class MessagesService:
             message_info['botSpamInferenceScore'] = inference.bot_spam_inference_score
             message_info['hasImpactException'] = self.sender_categorization.has_sender_exception(sender_address)
         return message_data
+
+    def extract_entities(self, messages) -> int:
+        """Run entity extraction over a list of EmailMessage objects.
+
+        Returns the number of job postings found, or 0 if the entity graph
+        manager is unavailable.  Django views that fetch full messages (body
+        included) via the provider should call this after fetching.
+        """
+        if self.entity_graph_manager is None:
+            return 0
+        return self.entity_graph_manager.process_messages(messages)
 
     def set_sender_impact_exception(self, sender_address: str, impact: Optional[str]) -> None:
         sender = (sender_address or '').strip().lower()

@@ -33,3 +33,10 @@ pytest>=8.0.0,<9.0.0
 # Caching
 keyring
 cryptography
+
+# Entity graph
+rdflib>=6.3.0,<8.0.0
+rapidfuzz>=3.0.0,<4.0.0
+# spaCy NER (model must be downloaded separately):
+#   python -m spacy download en_core_web_sm
+spacy>=3.5.0,<4.0.0

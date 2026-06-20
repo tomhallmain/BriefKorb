@@ -30,7 +30,7 @@ from ui.sender_categorization_window import SenderCategorizationWindow
 from email_client.utils.scope_checker import ScopeChecker
 from email_client.utils.message_grouping import MessageGroup, group_messages_by_sender
 from email_client.utils.content_type import ContentType
-from email_client.utils.workers import EmailWorkerThread, MessageBodyWorkerThread
+from email_client.utils.workers import EmailWorkerThread, MessageBodyWorkerThread, EntityExtractionWorkerThread
 from email_client.utils.html_utils import sanitize_html, convert_plain_text_to_html, is_html_content, strip_images_for_debug
 from email_client.utils.blocklist import BlocklistManager
 from email_client.utils.sender_categorization import SenderCategorizationManager, ImpactLevel
@@ -66,6 +66,7 @@ class MainWindow(SmartMainWindow):
         self.current_message_index: int = 0
         self.worker_thread: Optional[EmailWorkerThread] = None
         self.body_worker_thread: Optional[MessageBodyWorkerThread] = None
+        self.entity_extraction_worker: Optional[EntityExtractionWorkerThread] = None
         self.config: Optional[EmailServerConfig] = None
         self.config_path: Optional[str] = None
         self.blocklist: Optional[BlocklistManager] = None
@@ -579,7 +580,7 @@ class MainWindow(SmartMainWindow):
         self.current_group_index = None
         self.current_message_index = 0
         self._update_message_list()
-        
+
         # Hide progress
         self.progress_bar.setVisible(False)
         self.messages_loading_spinner.stop()
@@ -588,7 +589,24 @@ class MainWindow(SmartMainWindow):
         self.statusBar.showMessage(f"Loaded {total_messages} messages in {total_groups} groups")
         self.refresh_btn.setEnabled(True)
         self._sync_filter_button_labels()
+
+        # Kick off entity extraction in the background if the server supports it.
+        if self.server and self.server.entity_graph_manager and messages:
+            if self.entity_extraction_worker and self.entity_extraction_worker.isRunning():
+                self.entity_extraction_worker.quit()
+                self.entity_extraction_worker.wait()
+            self.entity_extraction_worker = EntityExtractionWorkerThread(self.server, messages)
+            self.entity_extraction_worker.extraction_complete.connect(self._on_entity_extraction_complete)
+            self.entity_extraction_worker.error_occurred.connect(self._on_entity_extraction_error)
+            self.entity_extraction_worker.start()
     
+    def _on_entity_extraction_complete(self, count: int) -> None:
+        if count:
+            self.statusBar.showMessage(f"Entity extraction complete — {count} job posting(s) found", 8000)
+
+    def _on_entity_extraction_error(self, error: str) -> None:
+        self.statusBar.showMessage(f"Entity extraction error: {error}", 6000)
+
     def _on_load_error(self, error: str):
         """Handle error from worker thread"""
         self.progress_bar.setVisible(False)

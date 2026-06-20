@@ -103,11 +103,11 @@ class EmailProvider(ABC):
 
 class UnifiedEmailServer:
     """Main class for the unified email server"""
-    
+
     def __init__(self, config: Optional[EmailServerConfig] = None, config_path: Optional[str] = None):
         """Initialize the email server with configuration"""
         self._providers: Dict[str, EmailProvider] = {}
-        
+
         if config is None and config_path is None:
             config_path = "email_server_config.json"
             config = create_default_config(config_path)
@@ -115,14 +115,29 @@ class UnifiedEmailServer:
         elif config_path is not None:
             config = EmailServerConfig.from_file(config_path)
             logger.info(f"Loaded configuration from {config_path}")
-        
+
         config.validate()
-        
+
         # Create shared TokenManager instance for all providers in this server instance
         self.token_manager = TokenManager(storage_path=config.token_storage_path)
         logger.info(f"Created shared TokenManager with storage path: {config.token_storage_path}")
-        
+
+        self.entity_graph_manager = self._init_entity_graph_manager(config.token_storage_path)
+
         self._initialize_providers(config)
+
+    @staticmethod
+    def _init_entity_graph_manager(token_storage_path: str):
+        try:
+            import os
+            from entity_graph import EntityGraphManager
+            storage_dir = os.path.join(token_storage_path, "entity_graph")
+            mgr = EntityGraphManager(storage_dir)
+            logger.info(f"Entity graph manager initialized at {storage_dir}")
+            return mgr
+        except Exception as e:
+            logger.warning(f"Entity graph manager unavailable: {e}")
+            return None
     
     def _initialize_providers(self, config: EmailServerConfig) -> None:
         """Initialize providers based on configuration"""
@@ -373,6 +388,16 @@ class UnifiedEmailServer:
         
         return success
     
+    def extract_entities(self, messages: List[EmailMessage]) -> int:
+        """Run entity extraction over a list of messages. Returns job posting count.
+
+        Returns 0 silently if the entity graph manager is unavailable (e.g. rdflib
+        not installed) so callers never need to guard against None.
+        """
+        if self.entity_graph_manager is None:
+            return 0
+        return self.entity_graph_manager.process_messages(messages)
+
     def delete_user_messages(self,
                            user_id: str,
                            provider_name: str,
