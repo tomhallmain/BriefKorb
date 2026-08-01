@@ -30,7 +30,7 @@ class MessagesService:
         
         # Load config
         app_dir = Path(__file__).parent.parent.parent
-        config_path = app_dir / 'email_server' / 'config.yaml'
+        config_path = EmailServerConfig.resolve_path(app_dir)
         
         if not config_path.exists():
             raise FileNotFoundError(f"Configuration file not found at {config_path}")

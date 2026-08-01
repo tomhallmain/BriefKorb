@@ -64,7 +64,7 @@ def microsoft_callback(request):
 
         # Load config
         app_dir = _get_app_dir()
-        config_path = app_dir / 'email_server' / 'config.yaml'
+        config_path = EmailServerConfig.resolve_path(app_dir)
 
         if not config_path.exists():
             return _error_response("Configuration Error", "Configuration file not found. Please configure BriefKorb first.")
@@ -198,7 +198,7 @@ def gmail_callback(request):
         
         # Load config
         app_dir = _get_app_dir()
-        config_path = app_dir / 'email_server' / 'config.yaml'
+        config_path = EmailServerConfig.resolve_path(app_dir)
         
         if not config_path.exists():
             return _error_response("Configuration Error", "Configuration file not found. Please configure BriefKorb first.")
@@ -318,7 +318,7 @@ def sign_in_microsoft(request):
     """Initiate Microsoft OAuth flow via MSAL and redirect to the authorization page"""
     try:
         app_dir = _get_app_dir()
-        config_path = app_dir / 'email_server' / 'config.yaml'
+        config_path = EmailServerConfig.resolve_path(app_dir)
 
         if not config_path.exists():
             return _error_response("Configuration Error", "Configuration file not found. Please configure BriefKorb first.")
@@ -350,7 +350,7 @@ def sign_in_gmail(request):
     """Initiate Gmail OAuth flow and redirect to the authorization page"""
     try:
         app_dir = _get_app_dir()
-        config_path = app_dir / 'email_server' / 'config.yaml'
+        config_path = EmailServerConfig.resolve_path(app_dir)
 
         if not config_path.exists():
             return _error_response("Configuration Error", "Configuration file not found. Please configure BriefKorb first.")

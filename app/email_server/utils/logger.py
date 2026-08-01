@@ -7,9 +7,20 @@ import glob
 import time
 
 def get_log_directory():
-    """Get the appropriate log directory based on the operating system."""
+    """Get the appropriate log directory based on the operating system.
+
+    Honors BRIEFKORB_LOG_DIR ahead of the OS-default location -- tests set
+    this so the eager `setup_logger(...)` calls that run at import time in
+    several email_server modules never create/write real user log files.
+    """
+    override = os.getenv('BRIEFKORB_LOG_DIR')
+    if override:
+        log_dir = Path(override)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        return log_dir
+
     system = platform.system().lower()
-    
+
     if system == 'windows':
         # Use AppData\Local for Windows
         appdata = os.getenv('LOCALAPPDATA')

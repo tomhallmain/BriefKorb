@@ -46,7 +46,7 @@ def _auth_status(config: EmailServerConfig) -> dict:
 
 def settings_view(request):
     app_dir = _get_app_dir()
-    config_path = app_dir / 'email_server' / 'config.yaml'
+    config_path = EmailServerConfig.resolve_path(app_dir)
 
     # Load or initialise config
     if config_path.exists():

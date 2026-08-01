@@ -26,7 +26,7 @@ def _get_authenticated_user_id(request):
     
     # Try to get from email_server token manager
     app_dir = Path(__file__).parent.parent.parent
-    config_path = app_dir / 'email_server' / 'config.yaml'
+    config_path = EmailServerConfig.resolve_path(app_dir)
     
     if config_path.exists():
         config = EmailServerConfig.from_file(str(config_path))

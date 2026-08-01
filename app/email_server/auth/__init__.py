@@ -4,6 +4,7 @@ Authentication module for email providers
 
 from typing import Dict, Any, Optional, Union
 import json
+import os
 from pathlib import Path
 from abc import ABC, abstractmethod
 from ..utils.logger import setup_logger
@@ -96,8 +97,19 @@ class OAuthProvider(ABC):
 
 class TokenManager:
     """Manages OAuth tokens and user sessions with disk persistence"""
-    
-    def __init__(self, storage_path: str = "tokens"):
+
+    DEFAULT_STORAGE_PATH = "tokens"
+
+    def __init__(self, storage_path: str = DEFAULT_STORAGE_PATH):
+        # BRIEFKORB_TOKEN_STORAGE_PATH only applies when the caller is relying
+        # on the class default (cwd-relative "tokens") -- MicrosoftOAuth,
+        # GmailOAuth, GmailProvider and MicrosoftGraphProvider all fall back to
+        # a bare TokenManager() when no token_manager is passed in, which
+        # would otherwise silently touch this repo's real tokens/ directory
+        # during tests. An explicitly-passed storage_path (e.g. a test's
+        # tmp_path) is never overridden.
+        if storage_path == self.DEFAULT_STORAGE_PATH:
+            storage_path = os.environ.get("BRIEFKORB_TOKEN_STORAGE_PATH") or storage_path
         self.storage_path = Path(storage_path)
         self._tokens: Dict[str, Dict] = {}
         self._user_info: Dict[str, Dict] = {}

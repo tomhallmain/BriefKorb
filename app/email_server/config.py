@@ -31,7 +31,7 @@ class EmailServerConfig:
     gmail: ProviderConfig
     token_storage_path: str = "tokens"
     log_level: str = "INFO"
-    
+
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> 'EmailServerConfig':
         """Create config from dictionary"""
@@ -42,6 +42,21 @@ class EmailServerConfig:
             log_level=config_dict.get('log_level', 'INFO')
         )
     
+    @staticmethod
+    def resolve_path(app_dir) -> Path:
+        """Resolve the config.yaml path for a given app directory.
+
+        Honors BRIEFKORB_CONFIG_PATH ahead of the conventional
+        <app_dir>/email_server/config.yaml location -- tests set this to
+        redirect every call site (views/services each compute app_dir
+        independently) away from the real repo's config.yaml without
+        touching production code at each site.
+        """
+        override = os.environ.get('BRIEFKORB_CONFIG_PATH')
+        if override:
+            return Path(override)
+        return Path(app_dir) / 'email_server' / 'config.yaml'
+
     @classmethod
     def from_file(cls, config_path: str) -> 'EmailServerConfig':
         """Load configuration from a YAML file"""
