@@ -236,7 +236,11 @@ def messages_api_view(request):
     docs/external-message-api-spec.md). Returns messages aggregated by
     sender -- the same shape the HTML messages view renders, just as JSON
     instead of a template. Not tied to any single named caller: any request
-    carrying a token from `external_api.tokens` is authorized."""
+    carrying a token from `external_api.tokens` is authorized.
+
+    Cost note for callers: each call is a live Microsoft Graph fetch
+    against BriefKorb's own token quota, not a cheap local/cached query.
+    Poll infrequently -- on the order of hours, not per-page-load."""
     user_id = _get_authenticated_user_id(request)
     if not user_id:
         return JsonResponse(
