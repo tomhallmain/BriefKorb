@@ -4,6 +4,8 @@ Messages views for BriefKorb web interface
 
 from django.shortcuts import render
 from django.contrib import messages as django_messages
+from django.http import JsonResponse
+from django.views.decorators.http import require_GET
 from dateutil import parser
 from pathlib import Path
 import sys
@@ -15,6 +17,7 @@ from email_server.auth import TokenManager
 from email_client.utils.sender_categorization import ImpactLevel
 from .services import MessagesService
 from django_app.calendar.services import get_iana_from_windows
+from django_app.authentication import require_external_api_token
 
 
 def _get_authenticated_user_id(request):
@@ -217,3 +220,54 @@ def messages_view(request):
             'error': str(e),
             'is_authenticated': False,
         })
+
+
+def _parse_bool_param(request, name: str, default: bool) -> bool:
+    raw = request.GET.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+@require_GET
+@require_external_api_token
+def messages_api_view(request):
+    """Read-only JSON endpoint for external consumers (see
+    docs/external-message-api-spec.md). Returns messages aggregated by
+    sender -- the same shape the HTML messages view renders, just as JSON
+    instead of a template. Not tied to any single named caller: any request
+    carrying a token from `external_api.tokens` is authorized."""
+    user_id = _get_authenticated_user_id(request)
+    if not user_id:
+        return JsonResponse(
+            {'error': 'No authenticated mailbox user is configured on this BriefKorb instance.'},
+            status=503,
+        )
+
+    mailbox = request.GET.get('mailbox', 'inbox')
+    unread_only = _parse_bool_param(request, 'unread_only', default=True)
+    high_impact_only = _parse_bool_param(request, 'high_impact_only', default=False)
+
+    try:
+        messages_service = MessagesService(user_id)
+        user_info = messages_service.get_user_info()
+        user_timezone = user_info.get('mailboxSettings', {}).get('timeZone') or 'UTC'
+        iana_timezone = get_iana_from_windows(user_timezone)
+
+        messages = messages_service.get_messages(
+            mailbox=mailbox,
+            exclude_read=unread_only,
+            max_messages=1000,
+            timezone=iana_timezone,
+        )
+        message_data = messages_service.aggregate_messages_by_sender(messages)
+        message_data = messages_service.annotate_sender_impact(message_data)
+        if high_impact_only:
+            message_data = [
+                msg_info for msg_info in message_data
+                if msg_info.get('impact') == ImpactLevel.HIGH_IMPACT.value
+            ]
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=502)
+
+    return JsonResponse({'messages': message_data})

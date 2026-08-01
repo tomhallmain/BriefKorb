@@ -3,8 +3,8 @@ Configuration management for the email server
 """
 
 import os
-from typing import Dict, Any, Optional
-from dataclasses import dataclass
+from typing import Dict, Any, List, Optional
+from dataclasses import dataclass, field
 from pathlib import Path
 import yaml
 
@@ -25,21 +25,54 @@ class ProviderConfig:
             self.additional_settings = {}
 
 @dataclass
+class ExternalApiToken:
+    """One bearer token authorized to call BriefKorb's external-facing API.
+
+    `label` is free text used only for logging/audit (which consumer made a
+    given call) -- it grants no additional permissions of its own.
+    """
+    token: str
+    label: str = ""
+
+@dataclass
+class ExternalApiConfig:
+    """Config for BriefKorb's read-only external API (see
+    docs/external-message-api-spec.md).
+
+    Deliberately a flat token registry rather than auth tied to one named
+    consumer: any request bearing a token from `tokens` is authorized, so
+    adding a new external consumer is a config change (register a token),
+    not a code change.
+    """
+    enabled: bool = False
+    tokens: List[ExternalApiToken] = field(default_factory=list)
+
+@dataclass
 class EmailServerConfig:
     """Main configuration for the email server"""
     microsoft: ProviderConfig
     gmail: ProviderConfig
     token_storage_path: str = "tokens"
     log_level: str = "INFO"
+    external_api: ExternalApiConfig = field(default_factory=ExternalApiConfig)
 
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> 'EmailServerConfig':
         """Create config from dictionary"""
+        external_api_dict = config_dict.get('external_api') or {}
+        external_api = ExternalApiConfig(
+            enabled=external_api_dict.get('enabled', False),
+            tokens=[
+                ExternalApiToken(token=t['token'], label=t.get('label', ''))
+                for t in external_api_dict.get('tokens', [])
+            ],
+        )
         return cls(
             microsoft=ProviderConfig(**config_dict.get('microsoft', {})),
             gmail=ProviderConfig(**config_dict.get('gmail', {})),
             token_storage_path=config_dict.get('token_storage_path', 'tokens'),
-            log_level=config_dict.get('log_level', 'INFO')
+            log_level=config_dict.get('log_level', 'INFO'),
+            external_api=external_api,
         )
     
     @staticmethod
@@ -96,7 +129,14 @@ class EmailServerConfig:
                 'additional_settings': self.gmail.additional_settings
             },
             'token_storage_path': self.token_storage_path,
-            'log_level': self.log_level
+            'log_level': self.log_level,
+            'external_api': {
+                'enabled': self.external_api.enabled,
+                'tokens': [
+                    {'token': t.token, 'label': t.label}
+                    for t in self.external_api.tokens
+                ],
+            }
         }
     
     def save(self, config_path: str) -> None:
