@@ -10,6 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, wait, Future
 from ...auth import MicrosoftOAuth, TokenManager
 from ... import EmailProvider, EmailMessage
+from ...blocked_sender_tracking import BlockedSenderTracker, BlockEvent
 from ...utils.logger import setup_logger
 
 # Set up logger
@@ -29,6 +30,8 @@ class MicrosoftGraphProvider(EmailProvider):
         logger.debug(f"MicrosoftGraphProvider using TokenManager with storage path: {self.token_manager.storage_path}")
         # Pass token_manager and scopes to avoid creating duplicate
         self.oauth = MicrosoftOAuth(client_id, client_secret, tenant_id, redirect_uri, self.token_manager, scopes=scopes)
+        # Records successful block_senders() rule creations for future auto-block analysis.
+        self.blocked_sender_tracker = BlockedSenderTracker(str(self.token_manager.storage_path))
         logger.info("Initialized Microsoft Graph provider")
     
     def authenticate(self, user_id: str) -> bool:
@@ -347,4 +350,82 @@ class MicrosoftGraphProvider(EmailProvider):
                 return failed_count < len(message_ids)  # Return True if at least some succeeded
         except Exception as e:
             logger.error(f"Failed to delete messages for user {user_id}: {str(e)}")
+            return False
+
+    def block_senders(self, user_id: str, sender_names: List[str]) -> bool:
+        """Create inbox rules that auto-delete future mail from each sender,
+        with retry logic and parallel processing (same pattern as
+        mark_as_read/delete_messages). Successful rule creations are
+        recorded via BlockedSenderTracker for future auto-block analysis.
+        """
+        if not sender_names:
+            return True
+
+        try:
+            headers = self._get_headers(user_id)
+            failed_count = 0
+
+            def create_block_rule(sender_name: str) -> bool:
+                rule_data = {
+                    'displayName': f'Delete messages from "{sender_name}"',
+                    'sequence': '2',
+                    'isEnabled': True,
+                    'conditions': {
+                        'senderContains': [sender_name]
+                    },
+                    'actions': {
+                        'delete': True,
+                        'stopProcessingRules': True
+                    }
+                }
+
+                def make_request():
+                    return requests.post(
+                        f'{self.base_url}/me/mailFolders/inbox/messageRules',
+                        headers=headers,
+                        json=rule_data
+                    )
+
+                response = self._retry_request(make_request)
+                if response is None or response.status_code >= 400:
+                    status = response.status_code if response is not None else 'None'
+                    logger.warning(f"Failed to create block rule for {sender_name}: HTTP {status}")
+                    return False
+                return True
+
+            # Process blocking rules in parallel using ThreadPoolExecutor
+            successful_senders: List[str] = []
+            with ThreadPoolExecutor(max_workers=min(10, len(sender_names))) as executor:
+                sender_futures: List[tuple] = [
+                    (sender_name, executor.submit(create_block_rule, sender_name))
+                    for sender_name in sender_names
+                ]
+
+                wait([future for _, future in sender_futures])
+
+                for sender_name, future in sender_futures:
+                    if future.result():
+                        successful_senders.append(sender_name)
+                    else:
+                        failed_count += 1
+
+            # Persist successful manual block actions for future auto-block models.
+            for sender_name in successful_senders:
+                self.blocked_sender_tracker.record(
+                    BlockEvent(
+                        sender=sender_name,
+                        source='django_web_messages',
+                        sender_kind='display_name',
+                        provider='microsoft',
+                        mailbox='inbox',
+                    )
+                )
+
+            if failed_count == 0:
+                logger.info(f"Successfully created block rules for {len(sender_names)} sender(s) for user {user_id}")
+            else:
+                logger.warning(f"Created block rules for {len(sender_names) - failed_count}/{len(sender_names)} sender(s) for user {user_id} ({failed_count} failed)")
+            return failed_count == 0
+        except Exception as e:
+            logger.error(f"Failed to block senders for user {user_id}: {str(e)}")
             return False 

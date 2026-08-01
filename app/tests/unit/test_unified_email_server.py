@@ -633,3 +633,48 @@ def test_get_message_delegates_to_provider_when_authenticated(tmp_path: Path, mo
 
     assert result is expected
     assert captured == {'user_id': 'user1', 'message_id': 'm1'}
+
+
+# --- block_senders --------------------------------------------------------------
+
+def test_block_senders_returns_false_for_unknown_provider(tmp_path: Path) -> None:
+    server = _server(tmp_path)
+    assert server.block_senders('user1', 'does-not-exist', ['Alice']) is False
+
+
+def test_block_senders_returns_false_when_authentication_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    provider = server.get_provider('microsoft')
+    monkeypatch.setattr(provider, 'authenticate', lambda user_id: False)
+
+    assert server.block_senders('user1', 'microsoft', ['Alice']) is False
+
+
+def test_block_senders_delegates_to_provider_when_authenticated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    provider = server.get_provider('microsoft')
+    monkeypatch.setattr(provider, 'authenticate', lambda user_id: True)
+    captured: Dict[str, Any] = {}
+
+    def fake_block_senders(user_id: str, sender_names: List[str]) -> bool:
+        captured.update(user_id=user_id, sender_names=sender_names)
+        return True
+
+    monkeypatch.setattr(provider, 'block_senders', fake_block_senders)
+
+    result = server.block_senders('user1', 'microsoft', ['Alice', 'Bob'])
+
+    assert result is True
+    assert captured == {'user_id': 'user1', 'sender_names': ['Alice', 'Bob']}
+
+
+def test_block_senders_returns_false_for_gmail_since_it_is_unsupported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Not a dispatch-layer test of GmailProvider's own behavior (that's
+    test_gmail_provider.py's job) -- just confirms UnifiedEmailServer
+    surfaces "unsupported" the same way as any other failure, with no
+    special-casing needed here."""
+    server = _server(tmp_path, microsoft=False, gmail=True)
+    provider = server.get_provider('gmail')
+    monkeypatch.setattr(provider, 'authenticate', lambda user_id: True)
+
+    assert server.block_senders('user1', 'gmail', ['Alice']) is False

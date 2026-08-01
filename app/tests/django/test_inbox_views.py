@@ -29,6 +29,8 @@ from django_app.messages import views as messages_views_module
 from email_client.utils.sender_categorization import ImpactInference, ImpactLevel
 from email_server.config import EmailServerConfig, ProviderConfig
 
+from _fake_unified_email_server import FakeAuthenticatedProvider, FakeUnifiedEmailServer, patch_server as _patch_server
+
 
 def _write_config(tmp_path: Path, microsoft_enabled: bool = True, gmail_enabled: bool = False) -> None:
     config = EmailServerConfig(
@@ -37,61 +39,6 @@ def _write_config(tmp_path: Path, microsoft_enabled: bool = True, gmail_enabled:
         token_storage_path=str(tmp_path / 'tokens'),
     )
     config.save(os.environ['BRIEFKORB_CONFIG_PATH'])
-
-
-@dataclass
-class FakeAuthenticatedProvider:
-    provider_name: str
-    user_id: str
-
-
-class FakeUnifiedEmailServer:
-    def __init__(
-        self,
-        authenticated_providers: Optional[List[FakeAuthenticatedProvider]] = None,
-        messages: Optional[List[Any]] = None,
-        digest: Optional[List[Dict[str, Any]]] = None,
-        entity_count: int = 0,
-        message_by_id: Optional[Dict[str, Any]] = None,
-        raise_on_fetch: Optional[Exception] = None,
-    ) -> None:
-        self._authenticated_providers = authenticated_providers if authenticated_providers is not None else []
-        self._messages = messages if messages is not None else []
-        self._digest = digest if digest is not None else []
-        self._entity_count = entity_count
-        self._message_by_id = message_by_id or {}
-        self._raise_on_fetch = raise_on_fetch
-        self.get_user_messages_calls: List[Dict[str, Any]] = []
-        self.get_message_digest_calls: List[Dict[str, Any]] = []
-        self.extract_entities_calls: List[Any] = []
-        self.get_message_calls: List[Dict[str, Any]] = []
-
-    def get_authenticated_providers(self, provider_name: Optional[str] = None) -> List[FakeAuthenticatedProvider]:
-        if provider_name is None:
-            return self._authenticated_providers
-        return [p for p in self._authenticated_providers if p.provider_name == provider_name]
-
-    def get_user_messages(self, folder: str = 'inbox', unread_only: bool = False, max_messages: int = 100) -> List[Any]:
-        self.get_user_messages_calls.append({'folder': folder, 'unread_only': unread_only, 'max_messages': max_messages})
-        if self._raise_on_fetch:
-            raise self._raise_on_fetch
-        return self._messages
-
-    def get_message_digest(self, messages: Optional[List[Any]] = None, **kwargs: Any) -> List[Dict[str, Any]]:
-        self.get_message_digest_calls.append({'messages': messages, **kwargs})
-        return self._digest
-
-    def extract_entities(self, messages: Any) -> int:
-        self.extract_entities_calls.append(messages)
-        return self._entity_count
-
-    def get_message(self, user_id: str, provider_name: str, message_id: str) -> Any:
-        self.get_message_calls.append({'user_id': user_id, 'provider_name': provider_name, 'message_id': message_id})
-        return self._message_by_id.get(message_id)
-
-
-def _patch_server(monkeypatch: pytest.MonkeyPatch, fake_server: FakeUnifiedEmailServer) -> None:
-    monkeypatch.setattr(messages_views_module, 'UnifiedEmailServer', lambda config: fake_server)
 
 
 # --- inbox_view --------------------------------------------------------------

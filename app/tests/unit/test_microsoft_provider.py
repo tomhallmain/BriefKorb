@@ -525,3 +525,83 @@ def test_delete_messages_returns_false_when_all_fail(tmp_path: Path, monkeypatch
     monkeypatch.setattr(microsoft_provider_module.requests, 'delete', lambda url, headers=None: _FakeResponse(status_code=500))
 
     assert provider.delete_messages('user1', ['m1']) is False
+
+
+# --- block_senders --------------------------------------------------------------
+#
+# block_senders() records a BlockedSenderTracker event per successful rule --
+# the real tracker is AppInfoCache-backed (OS keyring, see
+# test_app_info_cache.py), so every test here replaces
+# provider.blocked_sender_tracker with a simple recording fake rather than
+# letting it touch real encryption.
+
+class _FakeBlockedSenderTracker:
+    def __init__(self) -> None:
+        self.recorded: List[Any] = []
+
+    def record(self, event: Any) -> None:
+        self.recorded.append(event)
+
+
+def test_block_senders_returns_true_immediately_for_empty_list(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    assert provider.block_senders('user1', []) is True
+
+
+def test_block_senders_returns_false_when_not_authenticated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider(tmp_path)
+    monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: None)
+
+    assert provider.block_senders('user1', ['Alice']) is False
+
+
+def test_block_senders_creates_rule_per_sender_and_records_events_on_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider(tmp_path)
+    monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: {'access_token': 'at'})
+    monkeypatch.setattr(microsoft_provider_module.time, 'sleep', lambda s: None)
+    fake_tracker = _FakeBlockedSenderTracker()
+    monkeypatch.setattr(provider, 'blocked_sender_tracker', fake_tracker)
+    posted_urls: List[str] = []
+
+    def fake_post(url: str, headers: Any = None, json: Any = None) -> _FakeResponse:
+        posted_urls.append(url)
+        return _FakeResponse(status_code=201)
+
+    monkeypatch.setattr(microsoft_provider_module.requests, 'post', fake_post)
+
+    result = provider.block_senders('user1', ['Alice', 'Bob'])
+
+    assert result is True
+    assert posted_urls == [f'{provider.base_url}/me/mailFolders/inbox/messageRules'] * 2
+    assert sorted(e.sender for e in fake_tracker.recorded) == ['Alice', 'Bob']
+    assert all(e.provider == 'microsoft' for e in fake_tracker.recorded)
+
+
+def test_block_senders_only_records_successful_senders_and_returns_false_on_partial_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider(tmp_path)
+    monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: {'access_token': 'at'})
+    monkeypatch.setattr(microsoft_provider_module.time, 'sleep', lambda s: None)
+    fake_tracker = _FakeBlockedSenderTracker()
+    monkeypatch.setattr(provider, 'blocked_sender_tracker', fake_tracker)
+
+    def fake_post(url: str, headers: Any = None, json: Any = None) -> _FakeResponse:
+        sender = json['conditions']['senderContains'][0]
+        return _FakeResponse(status_code=201) if sender == 'Good' else _FakeResponse(status_code=500)
+
+    monkeypatch.setattr(microsoft_provider_module.requests, 'post', fake_post)
+
+    result = provider.block_senders('user1', ['Good', 'Bad'])
+
+    assert result is False
+    assert [e.sender for e in fake_tracker.recorded] == ['Good']
+
+
+def test_block_senders_returns_false_on_unexpected_exception(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider(tmp_path)
+
+    def raise_error(user_id: str) -> Any:
+        raise RuntimeError('boom')
+
+    monkeypatch.setattr(provider, '_get_headers', raise_error)
+
+    assert provider.block_senders('user1', ['Alice']) is False

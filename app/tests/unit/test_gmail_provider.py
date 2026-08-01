@@ -450,3 +450,14 @@ def test_delete_messages_returns_false_on_api_exception(tmp_path: Path) -> None:
     provider._service = _ExplodingService()
 
     assert provider.delete_messages('user1', ['m1']) is False
+
+
+# --- block_senders --------------------------------------------------------------
+
+def test_block_senders_always_returns_false(tmp_path: Path) -> None:
+    """Gmail has no equivalent to Microsoft Graph's inbox-rule mechanism in
+    this codebase -- confirmed unsupported, not a stand-in for "not
+    implemented yet"."""
+    provider = _provider(tmp_path)
+
+    assert provider.block_senders('user1', ['Alice', 'Bob']) is False

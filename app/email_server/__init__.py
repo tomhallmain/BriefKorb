@@ -112,6 +112,18 @@ class EmailProvider(ABC):
         """Delete messages for a user"""
         pass
 
+    @abstractmethod
+    def block_senders(self, user_id: str, sender_names: List[str]) -> bool:
+        """Block future mail from the given senders for a user, where the
+        provider supports it server-side.
+
+        Not every provider has an equivalent capability -- a provider
+        without one returns False rather than raising, so callers can
+        treat "not supported" the same as "failed" without special-casing
+        providers themselves.
+        """
+        pass
+
 class UnifiedEmailServer:
     """Main class for the unified email server"""
 
@@ -512,12 +524,36 @@ class UnifiedEmailServer:
             return False
             
         success = provider.delete_messages(user_id, message_ids)
-        
+
         if success:
             logger.info(f"Successfully deleted {len(message_ids)} messages for user {user_id} with provider {provider_name}")
         else:
             logger.error(f"Failed to delete messages for user {user_id} with provider {provider_name}")
-        
+
+        return success
+
+    def block_senders(self, user_id: str, provider_name: str, sender_names: List[str]) -> bool:
+        """Block future mail from the given senders for a user using the
+        specified provider, where that provider supports it (see
+        EmailProvider.block_senders -- not every provider has an
+        equivalent capability; an unsupported provider returns False here
+        the same as any other failure)."""
+        provider = self.get_provider(provider_name)
+        if not provider:
+            logger.error(f"Provider not found: {provider_name}")
+            return False
+
+        if not provider.authenticate(user_id):
+            logger.warning(f"Authentication failed for user {user_id} with provider {provider_name}")
+            return False
+
+        success = provider.block_senders(user_id, sender_names)
+
+        if success:
+            logger.info(f"Successfully blocked {len(sender_names)} sender(s) for user {user_id} with provider {provider_name}")
+        else:
+            logger.error(f"Failed to block senders for user {user_id} with provider {provider_name}")
+
         return success
 
 # Import providers at the end to avoid circular imports

@@ -9,82 +9,125 @@ from django.urls import reverse
 from django.views.decorators.http import require_GET
 from dateutil import parser
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from email_server import UnifiedEmailServer
 from email_server.config import EmailServerConfig
-from email_server.auth import TokenManager
 from email_client.utils.sender_categorization import ImpactLevel, SenderCategorizationManager
-from .services import MessagesService, annotate_sender_impact
-from django_app.calendar.services import get_iana_from_windows
+from .services import annotate_sender_impact
 from django_app.authentication import require_external_api_token
 
 
-def _get_authenticated_user_id(request):
-    """Get authenticated user ID from session or request"""
-    # Try to get from session first (legacy UI compatibility)
-    user = request.session.get('user', {})
-    if user and user.get('is_authenticated'):
-        return user.get('email') or user.get('userPrincipalName')
-    
-    # Try to get from email_server token manager
-    app_dir = Path(__file__).parent.parent.parent
-    config_path = EmailServerConfig.resolve_path(app_dir)
-    
-    if config_path.exists():
-        config = EmailServerConfig.from_file(str(config_path))
-        token_manager = TokenManager(storage_path=config.token_storage_path)
-        
-        # Get all user IDs and find a Microsoft-authenticated one
-        all_user_ids = token_manager.get_all_user_ids()
-        for user_id in all_user_ids:
-            token_data = token_manager.get_token(user_id)
-            if token_data and 'access_token' in token_data:
-                return user_id
-    
-    return None
+def _resolve_selected_buckets(
+    server: UnifiedEmailServer, mailbox: str, selected_keys: List[str],
+) -> List[Dict[str, Any]]:
+    """Resolve 'provider|fromName' selection keys (from messages.html's
+    checkboxes/context-menu, provider-prefixed since Gmail buckets can now
+    appear alongside Microsoft ones) into their matching digest buckets.
+
+    Fetches the *entire* mailbox (unread_only=False, a high max_messages)
+    rather than reusing the display fetch, matching this view's previous
+    (MessagesService-based) behavior: bulk actions apply to every message
+    from a selected sender, not just the currently-displayed unread-only
+    subset.
+    """
+    all_messages = server.get_user_messages(folder=mailbox, unread_only=False, max_messages=10000)
+    digest = server.get_message_digest(messages=all_messages)
+    selected_pairs = {tuple(key.split('|', 1)) for key in selected_keys if '|' in key}
+    return [b for b in digest if (b['provider'], b['fromName']) in selected_pairs]
+
+
+def _perform_bulk_action(request, server: UnifiedEmailServer, action: str, selected_buckets: List[Dict[str, Any]]) -> None:
+    """Perform markAsRead/deleteMessage/deleteMessageBlockSender across
+    however many providers the selected buckets span, and flash a summary
+    message. One provider's block_senders() failing (e.g. Gmail, which has
+    no server-side blocking capability -- see EmailProvider.block_senders)
+    doesn't stop the other providers' actions from running.
+    """
+    if not selected_buckets:
+        django_messages.error(request, "No matching messages found for the selected sender(s).")
+        return
+
+    buckets_by_provider: Dict[str, List[Dict[str, Any]]] = {}
+    for bucket in selected_buckets:
+        buckets_by_provider.setdefault(bucket['provider'], []).append(bucket)
+
+    overall_success = True
+    any_block_failed = False
+    for provider_name, buckets in buckets_by_provider.items():
+        authenticated = server.get_authenticated_providers(provider_name)
+        if not authenticated:
+            overall_success = False
+            continue
+        user_id = authenticated[0].user_id
+        message_ids = [m['id'] for b in buckets for m in b['messages']]
+        sender_names = [b['fromName'] for b in buckets]
+
+        if action == 'markAsRead':
+            success = server.mark_messages_as_read(user_id, provider_name, message_ids)
+        elif action == 'deleteMessage':
+            success = server.delete_user_messages(user_id, provider_name, message_ids)
+        else:  # deleteMessageBlockSender
+            delete_success = server.delete_user_messages(user_id, provider_name, message_ids)
+            block_success = server.block_senders(user_id, provider_name, sender_names)
+            success = delete_success and block_success
+            if delete_success and not block_success:
+                any_block_failed = True
+        overall_success = overall_success and success
+
+    sender_count = len(selected_buckets)
+    subject_desc = selected_buckets[0]['fromName'] if sender_count == 1 else f"{sender_count} sender(s)"
+    action_label = {
+        'markAsRead': 'marked as read',
+        'deleteMessage': 'deleted',
+        'deleteMessageBlockSender': 'deleted and blocked',
+    }[action]
+
+    if overall_success:
+        django_messages.success(request, f"Messages from {subject_desc} {action_label}.")
+    elif action == 'deleteMessageBlockSender' and any_block_failed:
+        django_messages.warning(request, f"Deleted messages from {subject_desc}, but failed to create some block rules.")
+    else:
+        django_messages.error(request, f"Failed to update messages from {subject_desc}.")
 
 
 def messages_view(request):
-    """Display messages aggregated by sender"""
-    user_id = _get_authenticated_user_id(request)
-    
-    if not user_id:
-        django_messages.error(request, "Please authenticate with Microsoft first.")
+    """Display messages aggregated by sender, and handle mark-as-read/
+    delete/block-sender/impact-override actions. Built on
+    UnifiedEmailServer, same as inbox_view and messages_api_view -- this
+    is the last of the three to migrate off the older, Microsoft-only
+    MessagesService path."""
+    config, error = _load_config()
+    if not error:
+        server, error = _load_authenticated_server(config)
+    if error:
         return render(request, 'django_app/messages/messages.html', {
             'messageData': [],
             'messages_length': 0,
             'mailbox': 'inbox',
             'exclude_read_messages': True,
-            'error': 'Please authenticate with Microsoft first. Use the BriefKorb desktop app to authenticate.',
+            'error': error,
             'is_authenticated': False,
         })
-    
+
+    mailbox = 'inbox'
+    exclude_read = True
+    high_impact_only = False
+    has_performed_update = False
+
     try:
-        messages_service = MessagesService(user_id)
-        user_info = messages_service.get_user_info()
-        
-        # Get user's timezone
-        user_timezone = user_info.get('mailboxSettings', {}).get('timeZone') or 'UTC'
-        iana_timezone = get_iana_from_windows(user_timezone)
-        
-        # Default values
-        default_mailbox = 'inbox'
-        mailbox = default_mailbox
-        exclude_read = True
-        high_impact_only = False
-        has_performed_update = False
-        
-        # Handle POST requests
+        sender_categorization = SenderCategorizationManager(config.token_storage_path)
+
         if request.method == 'POST':
             # Handle mailbox selection
             if 'mailbox' in request.POST:
                 mailbox_list = request.POST.getlist('mailbox')
                 if mailbox_list and mailbox_list[0]:
                     mailbox = mailbox_list[0]
-            
+
             # Handle exclude read toggle
             if 'excludeRead' in request.POST:
                 exclude_read = bool(request.POST.getlist('excludeRead'))
@@ -96,102 +139,49 @@ def messages_view(request):
             if set_impact_value:
                 try:
                     sender, impact = set_impact_value.split('|', 1)
-                    messages_service.set_sender_impact_exception(sender, impact)
+                    sender_categorization.set_sender_exception(sender.strip().lower(), ImpactLevel(impact), source='django_manual_exception')
                     django_messages.success(request, f"Updated sender impact for {sender}.")
                     has_performed_update = True
                 except ValueError:
                     django_messages.error(request, "Invalid sender impact update request.")
             elif clear_impact_sender:
-                messages_service.set_sender_impact_exception(clear_impact_sender, None)
+                sender_categorization.clear_sender_exception(clear_impact_sender.strip().lower())
                 django_messages.success(request, f"Cleared sender impact override for {clear_impact_sender}.")
                 has_performed_update = True
 
-            # Handle single-sender context menu actions
-            context_sender = request.POST.get('context_sender', '').strip()
+            # Handle single-sender context menu actions (value is "provider|fromName")
+            context_sender_key = request.POST.get('context_sender', '').strip()
             context_action = request.POST.get('context_action', '').strip()
-            if context_sender and context_action:
-                selected_senders = [context_sender]
-                if context_action == 'markAsRead':
-                    success = messages_service.mark_messages_as_read(selected_senders, mailbox)
-                    if success:
-                        django_messages.success(request, f"Marked messages from {context_sender} as read.")
-                    else:
-                        django_messages.error(request, f"Failed to mark messages from {context_sender} as read.")
-                elif context_action == 'deleteMessage':
-                    success = messages_service.delete_messages(selected_senders, mailbox)
-                    if success:
-                        django_messages.success(request, f"Deleted messages from {context_sender}.")
-                    else:
-                        django_messages.error(request, f"Failed to delete messages from {context_sender}.")
-                elif context_action == 'deleteMessageBlockSender':
-                    delete_success = messages_service.delete_messages(selected_senders, mailbox)
-                    block_success = messages_service.block_senders(selected_senders)
-                    if delete_success and block_success:
-                        django_messages.success(request, f"Deleted messages and blocked {context_sender}.")
-                    elif delete_success:
-                        django_messages.warning(request, f"Deleted messages from {context_sender}, but failed to create block rule.")
-                    else:
-                        django_messages.error(request, f"Failed to delete messages from {context_sender}.")
-
-                has_performed_update = True
-            
-            # Handle actions on selected senders
-            if 'selected_options' in request.POST and not (context_sender and context_action):
-                selected_senders = request.POST.getlist('selected_options')
-                action = None
-                
+            selected_keys: List[str] = []
+            action: Optional[str] = None
+            if context_sender_key and context_action:
+                selected_keys = [context_sender_key]
+                action = context_action
+            elif 'selected_options' in request.POST:
+                selected_keys = request.POST.getlist('selected_options')
                 if 'markAsRead' in request.POST:
                     action = 'markAsRead'
                 elif 'deleteMessage' in request.POST:
                     action = 'deleteMessage'
                 elif 'deleteMessageBlockSender' in request.POST:
                     action = 'deleteMessageBlockSender'
-                
-                if action and selected_senders:
-                    if action == 'markAsRead':
-                        success = messages_service.mark_messages_as_read(selected_senders, mailbox)
-                        if success:
-                            django_messages.success(request, f"Marked messages from {len(selected_senders)} sender(s) as read.")
-                        else:
-                            django_messages.error(request, "Failed to mark some messages as read.")
-                    elif action == 'deleteMessage':
-                        success = messages_service.delete_messages(selected_senders, mailbox)
-                        if success:
-                            django_messages.success(request, f"Deleted messages from {len(selected_senders)} sender(s).")
-                        else:
-                            django_messages.error(request, "Failed to delete some messages.")
-                    elif action == 'deleteMessageBlockSender':
-                        # Delete messages first
-                        delete_success = messages_service.delete_messages(selected_senders, mailbox)
-                        # Then create blocking rules
-                        block_success = messages_service.block_senders(selected_senders)
-                        
-                        if delete_success and block_success:
-                            django_messages.success(request, f"Deleted messages and blocked {len(selected_senders)} sender(s).")
-                        elif delete_success:
-                            django_messages.warning(request, f"Deleted messages from {len(selected_senders)} sender(s), but failed to create some block rules.")
-                        else:
-                            django_messages.error(request, "Failed to delete some messages.")
-                    
-                    has_performed_update = True
-        
-        # Get messages
-        messages = messages_service.get_messages(
-            mailbox=mailbox,
-            exclude_read=exclude_read,
-            max_messages=1000,
-            timezone=iana_timezone
-        )
-        
-        # Aggregate by sender
-        message_data = messages_service.aggregate_messages_by_sender(messages)
-        message_data = messages_service.annotate_sender_impact(message_data)
+
+            if action and selected_keys:
+                selected_buckets = _resolve_selected_buckets(server, mailbox, selected_keys)
+                _perform_bulk_action(request, server, action, selected_buckets)
+                has_performed_update = True
+
+        # Fetch fresh for display -- reflects any action just performed above,
+        # or is simply the normal display fetch if this was a GET/filter-only request.
+        messages = server.get_user_messages(folder=mailbox, unread_only=exclude_read, max_messages=1000)
+        message_data = server.get_message_digest(messages=messages)
+        message_data = annotate_sender_impact(message_data, sender_categorization)
         if high_impact_only:
             message_data = [
                 msg_info for msg_info in message_data
                 if msg_info.get('impact') == ImpactLevel.HIGH_IMPACT.value
             ]
-        
+
         # Parse dates for template
         for msg_info in message_data:
             if msg_info.get('lastReceivedDateTime'):
@@ -199,7 +189,7 @@ def messages_view(request):
                     msg_info['lastReceivedDateTime'] = parser.parse(msg_info['lastReceivedDateTime'])
                 except:
                     pass
-        
+
         context = {
             'messageData': message_data,
             'messages_length': len(messages),
@@ -209,9 +199,9 @@ def messages_view(request):
             'has_performed_update': has_performed_update,
             'is_authenticated': True,
         }
-        
+
         return render(request, 'django_app/messages/messages.html', context)
-        
+
     except Exception as e:
         django_messages.error(request, f"Error loading messages: {str(e)}")
         return render(request, 'django_app/messages/messages.html', {
@@ -229,6 +219,35 @@ def _parse_bool_param(request, name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _load_config() -> Tuple[Optional[EmailServerConfig], Optional[str]]:
+    """Resolve and load config.yaml, or return (None, <error message>) if
+    it doesn't exist yet. Shared by every view in this module that needs
+    config -- each still decides for itself how to surface the error
+    (JsonResponse vs render)."""
+    app_dir = Path(__file__).parent.parent.parent
+    config_path = EmailServerConfig.resolve_path(app_dir)
+    if not config_path.exists():
+        return None, 'BriefKorb is not configured on this instance.'
+    return EmailServerConfig.from_file(str(config_path)), None
+
+
+def _load_authenticated_server(config: EmailServerConfig) -> Tuple[Optional[UnifiedEmailServer], Optional[str]]:
+    """Construct a UnifiedEmailServer for `config` and confirm at least one
+    provider has an authenticated user, or return (None, <error message>).
+
+    Shared by views that aggregate/act across "whichever providers are
+    configured" (messages_api_view, inbox_view, messages_view) -- not
+    message_detail_view (needs one specific provider) or
+    sender_categorization_view (doesn't need a server at all).
+    """
+    if not (config.microsoft.enabled or config.gmail.enabled):
+        return None, 'No email provider is configured on this BriefKorb instance.'
+    server = UnifiedEmailServer(config=config)
+    if not server.get_authenticated_providers():
+        return None, 'Please authenticate with Microsoft or Gmail first. Use the BriefKorb desktop app to authenticate.'
+    return server, None
 
 
 @require_GET
@@ -252,25 +271,19 @@ def messages_api_view(request):
     Cost note for callers: each call is one or more live Graph/Gmail API
     fetches against BriefKorb's own token quota, not a cheap local/cached
     query. Poll infrequently -- on the order of hours, not per-page-load."""
-    app_dir = Path(__file__).parent.parent.parent
-    config_path = EmailServerConfig.resolve_path(app_dir)
-    if not config_path.exists():
-        return JsonResponse({'error': 'BriefKorb is not configured on this instance.'}, status=503)
-    config = EmailServerConfig.from_file(str(config_path))
-    if not (config.microsoft.enabled or config.gmail.enabled):
-        return JsonResponse({'error': 'No email provider is configured on this BriefKorb instance.'}, status=503)
+    config, error = _load_config()
+    if error:
+        return JsonResponse({'error': error}, status=503)
+
+    server, error = _load_authenticated_server(config)
+    if error:
+        return JsonResponse({'error': error}, status=503)
 
     mailbox = request.GET.get('mailbox', 'inbox')
     unread_only = _parse_bool_param(request, 'unread_only', default=True)
     high_impact_only = _parse_bool_param(request, 'high_impact_only', default=False)
 
     try:
-        server = UnifiedEmailServer(config=config)
-        if not server.get_authenticated_providers():
-            return JsonResponse(
-                {'error': 'No authenticated mailbox user is configured on this BriefKorb instance.'},
-                status=503,
-            )
         message_data = server.get_message_digest(folder=mailbox, unread_only=unread_only, max_messages=1000)
         sender_categorization = SenderCategorizationManager(config.token_storage_path)
         message_data = annotate_sender_impact(message_data, sender_categorization)
@@ -286,45 +299,24 @@ def messages_api_view(request):
     return JsonResponse({'messages': message_data})
 
 
-def _no_provider_configured(config: EmailServerConfig) -> bool:
-    return not (config.microsoft.enabled or config.gmail.enabled)
-
-
 @require_GET
 def inbox_view(request):
     """Browse and read individual messages across every authenticated
-    provider (Microsoft and/or Gmail) -- unlike messages_view, which only
-    ever shows Microsoft-sourced aggregate sender buckets via the older
-    MessagesService path. Built on UnifiedEmailServer, the same layer
-    messages_api_view uses, so this naturally covers Gmail too with no
-    per-provider code here. messages_view's own aggregate table and bulk
-    actions are deliberately left on their existing MessagesService path in
-    this pass -- migrating those touches more tested, primary-path code
-    than adding this new, additive view does."""
-    app_dir = Path(__file__).parent.parent.parent
-    config_path = EmailServerConfig.resolve_path(app_dir)
-    if not config_path.exists():
+    provider (Microsoft and/or Gmail). Built on UnifiedEmailServer, the
+    same layer messages_api_view and (as of this migration) messages_view
+    both use."""
+    config, error = _load_config()
+    if not error:
+        server, error = _load_authenticated_server(config)
+    if error:
         return render(request, 'django_app/messages/inbox.html', {
-            'messageData': [], 'is_authenticated': False,
-            'error': 'BriefKorb is not configured on this instance.',
-        })
-    config = EmailServerConfig.from_file(str(config_path))
-    if _no_provider_configured(config):
-        return render(request, 'django_app/messages/inbox.html', {
-            'messageData': [], 'is_authenticated': False,
-            'error': 'No email provider is configured on this BriefKorb instance.',
+            'messageData': [], 'is_authenticated': False, 'error': error,
         })
 
     mailbox = request.GET.get('mailbox', 'inbox')
     unread_only = _parse_bool_param(request, 'unread_only', default=True)
 
     try:
-        server = UnifiedEmailServer(config=config)
-        if not server.get_authenticated_providers():
-            return render(request, 'django_app/messages/inbox.html', {
-                'messageData': [], 'is_authenticated': False,
-                'error': 'Please authenticate with Microsoft or Gmail first. Use the BriefKorb desktop app to authenticate.',
-            })
         messages = server.get_user_messages(folder=mailbox, unread_only=unread_only, max_messages=1000)
         message_data = server.get_message_digest(messages=messages)
         # Non-fatal if entity_graph is unavailable -- extract_entities()
@@ -349,13 +341,9 @@ def inbox_view(request):
 def message_detail_view(request, provider, message_id):
     """Read a single message's full body -- the drill-down target from
     inbox_view's per-sender message list."""
-    app_dir = Path(__file__).parent.parent.parent
-    config_path = EmailServerConfig.resolve_path(app_dir)
-    if not config_path.exists():
-        return render(request, 'django_app/messages/message_detail.html', {
-            'error': 'BriefKorb is not configured on this instance.',
-        })
-    config = EmailServerConfig.from_file(str(config_path))
+    config, error = _load_config()
+    if error:
+        return render(request, 'django_app/messages/message_detail.html', {'error': error})
 
     try:
         server = UnifiedEmailServer(config=config)
@@ -389,13 +377,11 @@ def sender_categorization_view(request):
     Microsoft-only service would make this page unusable on a Gmail-only
     instance for no real reason.
     """
-    app_dir = Path(__file__).parent.parent.parent
-    config_path = EmailServerConfig.resolve_path(app_dir)
-    if not config_path.exists():
+    config, error = _load_config()
+    if error:
         return render(request, 'django_app/messages/sender_categorization.html', {
-            'records': [], 'error': 'BriefKorb is not configured on this instance.',
+            'records': [], 'error': error,
         })
-    config = EmailServerConfig.from_file(str(config_path))
     sender_categorization = SenderCategorizationManager(config.token_storage_path)
 
     if request.method == 'POST':

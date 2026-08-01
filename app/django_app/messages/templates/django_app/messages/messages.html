@@ -95,6 +95,7 @@
             <thead>
                 <tr>
                     <th scope="col">Select</th>
+                    <th scope="col">Provider</th>
                     <th scope="col">From Name</th>
                     <th scope="col">From Address</th>
                     <th scope="col">Subject</th>
@@ -107,10 +108,11 @@
             <tbody>
                 {% if messageData %}
                     {% for messageInfo in messageData %}
-                        <tr class="sender-row" data-sender-name="{{ messageInfo.fromName }}">
+                        <tr class="sender-row" data-sender-key="{{ messageInfo.provider }}|{{ messageInfo.fromName }}">
                             <td>
-                                <input type="checkbox" name="selected_options" value="{{ messageInfo.fromName }}">
+                                <input type="checkbox" name="selected_options" value="{{ messageInfo.provider }}|{{ messageInfo.fromName }}">
                             </td>
+                            <td><span class="badge badge-info">{{ messageInfo.provider }}</span></td>
                             <td>{{ messageInfo.fromName }}</td>
                             <td>{{ messageInfo.fromAddress }}</td>
                             <td>{{ messageInfo.subject }}</td>
@@ -140,7 +142,7 @@
                     {% endfor %}
                 {% else %}
                     <tr>
-                        <td colspan="8" class="text-center text-muted">No messages found</td>
+                        <td colspan="9" class="text-center text-muted">No messages found</td>
                     </tr>
                 {% endif %}
             </tbody>
@@ -192,18 +194,18 @@ const senderContextMenu = document.getElementById('groupContextMenu');
 const contextSenderInput = document.getElementById('context_sender');
 const contextActionInput = document.getElementById('context_action');
 const messagesForm = document.querySelector('form[method="POST"]');
-let activeSender = '';
+let activeSenderKey = '';  // "provider|fromName"
 
 function hideSenderContextMenu() {
     senderContextMenu.style.display = 'none';
-    activeSender = '';
+    activeSenderKey = '';
 }
 
 document.querySelectorAll('.sender-row').forEach(row => {
     row.addEventListener('contextmenu', function(event) {
         event.preventDefault();
-        activeSender = this.dataset.senderName || '';
-        if (!activeSender) {
+        activeSenderKey = this.dataset.senderKey || '';
+        if (!activeSenderKey) {
             return;
         }
 
@@ -215,11 +217,11 @@ document.querySelectorAll('.sender-row').forEach(row => {
 
 senderContextMenu.querySelectorAll('button[data-action]').forEach(button => {
     button.addEventListener('click', function() {
-        if (!activeSender) {
+        if (!activeSenderKey) {
             return;
         }
 
-        contextSenderInput.value = activeSender;
+        contextSenderInput.value = activeSenderKey;
         contextActionInput.value = this.dataset.action;
         messagesForm.submit();
     });
