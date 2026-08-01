@@ -1,12 +1,18 @@
-"""Blocklist manager backed by encrypted app cache."""
+"""Sender blocklist backed by encrypted app cache.
 
+A queryable set of suppressed sender addresses, shared by every caller
+of UnifiedEmailServer (desktop and web) since it's constructed from the
+same storage_path -- distinct from BlockedSenderTracker (blocked_sender_
+tracking.py), which is an append-only audit log of block events rather
+than a queryable suppression set.
+"""
 from typing import Set
 
 from email_server.utils.app_info_cache import get_app_info_cache
 
 
-class BlocklistManager:
-    """Manages a persistent list of blocked sender email addresses"""
+class SenderBlocklist:
+    """Manages a persistent set of blocked sender email addresses."""
     CACHE_KEY = "blocked_senders"
 
     def __init__(self, storage_path: str):

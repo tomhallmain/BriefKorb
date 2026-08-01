@@ -332,6 +332,43 @@ def test_get_user_messages_returns_empty_list_for_empty_provider_list(tmp_path: 
     assert server.get_user_messages(providers=[]) == []
 
 
+def test_get_user_messages_excludes_blocked_senders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    provider = server.get_provider('microsoft')
+    server.token_manager.store_token('user1', {'access_token': 'at'})
+    monkeypatch.setattr(provider, 'authenticate', lambda user_id: True)
+    blocked = _message('m1', datetime(2024, 1, 1, tzinfo=timezone.utc))
+    blocked.sender = 'spam@example.com'
+    allowed = _message('m2', datetime(2024, 6, 1, tzinfo=timezone.utc))
+    allowed.sender = 'friend@example.com'
+    monkeypatch.setattr(provider, 'get_messages', lambda **kwargs: [blocked, allowed])
+    server.block_sender('spam@example.com')
+
+    result = server.get_user_messages()
+
+    assert [m.id for m in result] == ['m2']
+
+
+# --- blocklist -------------------------------------------------------------
+
+def test_block_sender_and_is_sender_blocked_round_trip(tmp_path: Path) -> None:
+    server = _server(tmp_path)
+
+    assert server.is_sender_blocked('spam@example.com') is False
+
+    server.block_sender('Spam@Example.COM')
+
+    assert server.is_sender_blocked('spam@example.com') is True
+
+
+def test_get_blocked_senders_returns_all_blocked(tmp_path: Path) -> None:
+    server = _server(tmp_path)
+    server.block_sender('a@example.com')
+    server.block_sender('b@example.com')
+
+    assert server.get_blocked_senders() == {'a@example.com', 'b@example.com'}
+
+
 # --- send_message --------------------------------------------------------------
 
 def test_send_message_returns_false_for_unknown_provider(tmp_path: Path) -> None:
@@ -656,8 +693,8 @@ def test_block_senders_delegates_to_provider_when_authenticated(tmp_path: Path, 
     monkeypatch.setattr(provider, 'authenticate', lambda user_id: True)
     captured: Dict[str, Any] = {}
 
-    def fake_block_senders(user_id: str, sender_names: List[str]) -> bool:
-        captured.update(user_id=user_id, sender_names=sender_names)
+    def fake_block_senders(user_id: str, sender_names: List[str], source: str = 'api') -> bool:
+        captured.update(user_id=user_id, sender_names=sender_names, source=source)
         return True
 
     monkeypatch.setattr(provider, 'block_senders', fake_block_senders)
@@ -665,7 +702,24 @@ def test_block_senders_delegates_to_provider_when_authenticated(tmp_path: Path, 
     result = server.block_senders('user1', 'microsoft', ['Alice', 'Bob'])
 
     assert result is True
-    assert captured == {'user_id': 'user1', 'sender_names': ['Alice', 'Bob']}
+    assert captured == {'user_id': 'user1', 'sender_names': ['Alice', 'Bob'], 'source': 'api'}
+
+
+def test_block_senders_passes_through_explicit_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    provider = server.get_provider('microsoft')
+    monkeypatch.setattr(provider, 'authenticate', lambda user_id: True)
+    captured: Dict[str, Any] = {}
+
+    def fake_block_senders(user_id: str, sender_names: List[str], source: str = 'api') -> bool:
+        captured.update(source=source)
+        return True
+
+    monkeypatch.setattr(provider, 'block_senders', fake_block_senders)
+
+    server.block_senders('user1', 'microsoft', ['Alice'], source='desktop_email_client')
+
+    assert captured == {'source': 'desktop_email_client'}
 
 
 def test_block_senders_returns_false_for_gmail_since_it_is_unsupported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

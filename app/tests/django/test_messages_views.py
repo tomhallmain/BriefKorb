@@ -286,7 +286,7 @@ def test_messages_view_post_context_delete_and_block_reports_warning_when_block_
     })
 
     assert fake_server.delete_user_messages_calls == [{'user_id': 'user1', 'provider_name': 'gmail', 'message_ids': ['m1']}]
-    assert fake_server.block_senders_calls == [{'user_id': 'user1', 'provider_name': 'gmail', 'sender_names': ['Alice']}]
+    assert fake_server.block_senders_calls == [{'user_id': 'user1', 'provider_name': 'gmail', 'sender_names': ['Alice'], 'source': 'django_web_messages'}]
     messages_shown = [str(m) for m in response.context['messages']]
     assert any('failed to create some block rules' in m for m in messages_shown)
 

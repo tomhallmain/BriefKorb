@@ -32,7 +32,6 @@ from email_client.utils.message_grouping import MessageGroup, group_messages_by_
 from email_client.utils.content_type import ContentType
 from email_client.utils.workers import EmailWorkerThread, MessageBodyWorkerThread, EntityExtractionWorkerThread
 from email_client.utils.html_utils import sanitize_html, convert_plain_text_to_html, is_html_content, strip_images_for_debug
-from email_client.utils.blocklist import BlocklistManager
 from email_client.utils.sender_categorization import SenderCategorizationManager, ImpactLevel
 from lib.loading_spinner_qt import LoadingSpinnerBadge
 
@@ -69,7 +68,6 @@ class MainWindow(SmartMainWindow):
         self.entity_extraction_worker: Optional[EntityExtractionWorkerThread] = None
         self.config: Optional[EmailServerConfig] = None
         self.config_path: Optional[str] = None
-        self.blocklist: Optional[BlocklistManager] = None
         self.blocked_sender_tracker: Optional[BlockedSenderTracker] = None
         self.sender_categorization: Optional[SenderCategorizationManager] = None
         self.sender_categorization_window: Optional[SenderCategorizationWindow] = None
@@ -378,7 +376,6 @@ class MainWindow(SmartMainWindow):
             
             self.config = EmailServerConfig.from_file(str(config_path))
             self.server = UnifiedEmailServer(config=self.config)
-            self.blocklist = BlocklistManager(self.config.token_storage_path)
             self.blocked_sender_tracker = BlockedSenderTracker(self.config.token_storage_path)
             self.sender_categorization = SenderCategorizationManager(self.config.token_storage_path)
             self._update_ui_permissions()
@@ -568,10 +565,8 @@ class MainWindow(SmartMainWindow):
     
     def _on_messages_loaded(self, messages: List[EmailMessage]):
         """Handle messages loaded from worker thread"""
-        # Filter out messages from blocked senders
-        if self.blocklist:
-            from email_client.utils.message_grouping import extract_sender_email
-            messages = [m for m in messages if not self.blocklist.is_blocked(extract_sender_email(m.sender))]
+        # Blocked-sender filtering happens server-side, in
+        # UnifiedEmailServer.get_user_messages().
         self.current_messages = messages
         # Group messages by sender
         self.current_groups = group_messages_by_sender(messages)
@@ -1100,8 +1095,8 @@ class MainWindow(SmartMainWindow):
         """Block a sender for a specific group and delete grouped messages."""
         sender = group.sender_email
 
-        if not self.blocklist:
-            QMessageBox.warning(self, "Error", "Blocklist is not available.")
+        if not self.server:
+            QMessageBox.warning(self, "Error", "Server is not available.")
             return
 
         reply = QMessageBox.question(
@@ -1113,7 +1108,21 @@ class MainWindow(SmartMainWindow):
         if reply != QMessageBox.Yes:
             return
 
-        self.blocklist.block(sender)
+        self.server.block_sender(sender)
+
+        # Best-effort: also create a durable, provider-side block where the
+        # provider supports it (e.g. a Microsoft Graph inbox rule). Not every
+        # provider does (Gmail returns False) -- that's fine, the local
+        # suppression list above still covers display filtering either way.
+        by_provider: dict = {}
+        for message in group.messages:
+            by_provider.setdefault(message.provider, []).append(message)
+        for provider_name, messages in by_provider.items():
+            auth_prov = self._get_auth_provider_for_message(messages[0])
+            if not auth_prov:
+                continue
+            self.server.block_senders(auth_prov.user_id, provider_name, [sender], source="desktop_email_client")
+
         if self.blocked_sender_tracker:
             self.blocked_sender_tracker.record(
                 BlockEvent(

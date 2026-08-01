@@ -50,7 +50,7 @@ if "keyring" not in sys.modules:
 #     MicrosoftOAuth, GmailOAuth, GmailProvider and MicrosoftGraphProvider
 #     when no token_manager is passed in) defaults to a cwd-relative
 #     "tokens" dir, which can resolve to this repo's real tokens/ directory.
-#   - SenderCategorizationManager (and therefore BlocklistManager /
+#   - SenderCategorizationManager (and therefore SenderBlocklist /
 #     BlockedSenderTracker, which persist through the same AppInfoCache-
 #     backed self._cache) is fully covered by BRIEFKORB_CACHE_DIR above for
 #     its *data* -- but its __init__ separately calls

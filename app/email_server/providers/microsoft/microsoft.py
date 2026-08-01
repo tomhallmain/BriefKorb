@@ -352,11 +352,13 @@ class MicrosoftGraphProvider(EmailProvider):
             logger.error(f"Failed to delete messages for user {user_id}: {str(e)}")
             return False
 
-    def block_senders(self, user_id: str, sender_names: List[str]) -> bool:
+    def block_senders(self, user_id: str, sender_names: List[str], source: str = 'api') -> bool:
         """Create inbox rules that auto-delete future mail from each sender,
         with retry logic and parallel processing (same pattern as
         mark_as_read/delete_messages). Successful rule creations are
-        recorded via BlockedSenderTracker for future auto-block analysis.
+        recorded via BlockedSenderTracker for future auto-block analysis,
+        tagged with `source` (identifies the caller, e.g.
+        'django_web_messages' or 'desktop_email_client').
         """
         if not sender_names:
             return True
@@ -414,7 +416,7 @@ class MicrosoftGraphProvider(EmailProvider):
                 self.blocked_sender_tracker.record(
                     BlockEvent(
                         sender=sender_name,
-                        source='django_web_messages',
+                        source=source,
                         sender_kind='display_name',
                         provider='microsoft',
                         mailbox='inbox',

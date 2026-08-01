@@ -461,3 +461,9 @@ def test_block_senders_always_returns_false(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
 
     assert provider.block_senders('user1', ['Alice', 'Bob']) is False
+
+
+def test_block_senders_always_returns_false_regardless_of_source(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+
+    assert provider.block_senders('user1', ['Alice'], source='desktop_email_client') is False

@@ -7,13 +7,14 @@ This module provides a unified interface for interacting with different email pr
 
 from abc import ABC, abstractmethod
 from email.utils import parseaddr
-from typing import Any, List, Dict, Optional, Union, TYPE_CHECKING
+from typing import Any, List, Dict, Optional, Set, Union, TYPE_CHECKING
 from datetime import datetime
 from dataclasses import dataclass
 from .config import EmailServerConfig, create_default_config
 from .utils.logger import setup_logger
 from .utils.datetime_compat import normalize_received_at_utc
 from .auth import TokenManager
+from .blocklist import SenderBlocklist
 
 # Set up logger
 logger = setup_logger('email_server')
@@ -113,7 +114,7 @@ class EmailProvider(ABC):
         pass
 
     @abstractmethod
-    def block_senders(self, user_id: str, sender_names: List[str]) -> bool:
+    def block_senders(self, user_id: str, sender_names: List[str], source: str = 'api') -> bool:
         """Block future mail from the given senders for a user, where the
         provider supports it server-side.
 
@@ -121,6 +122,10 @@ class EmailProvider(ABC):
         without one returns False rather than raising, so callers can
         treat "not supported" the same as "failed" without special-casing
         providers themselves.
+
+        `source` identifies the caller for the block-event audit trail
+        (e.g. 'django_web_messages', 'desktop_email_client') -- it does
+        not affect blocking behavior itself.
         """
         pass
 
@@ -144,6 +149,8 @@ class UnifiedEmailServer:
         # Create shared TokenManager instance for all providers in this server instance
         self.token_manager = TokenManager(storage_path=config.token_storage_path)
         logger.info(f"Created shared TokenManager with storage path: {config.token_storage_path}")
+
+        self.blocklist = SenderBlocklist(config.token_storage_path)
 
         self.entity_graph_manager = self._init_entity_graph_manager(config.token_storage_path)
 
@@ -359,6 +366,8 @@ class UnifiedEmailServer:
         for m in messages:
             m.received_date = normalize_received_at_utc(m.received_date)
 
+        messages = [m for m in messages if not self.is_sender_blocked(parseaddr(m.sender or '')[1])]
+
         return sorted(messages, key=lambda x: x.received_date, reverse=True)
 
     def get_message_digest(
@@ -532,7 +541,7 @@ class UnifiedEmailServer:
 
         return success
 
-    def block_senders(self, user_id: str, provider_name: str, sender_names: List[str]) -> bool:
+    def block_senders(self, user_id: str, provider_name: str, sender_names: List[str], source: str = 'api') -> bool:
         """Block future mail from the given senders for a user using the
         specified provider, where that provider supports it (see
         EmailProvider.block_senders -- not every provider has an
@@ -547,7 +556,7 @@ class UnifiedEmailServer:
             logger.warning(f"Authentication failed for user {user_id} with provider {provider_name}")
             return False
 
-        success = provider.block_senders(user_id, sender_names)
+        success = provider.block_senders(user_id, sender_names, source=source)
 
         if success:
             logger.info(f"Successfully blocked {len(sender_names)} sender(s) for user {user_id} with provider {provider_name}")
@@ -555,6 +564,25 @@ class UnifiedEmailServer:
             logger.error(f"Failed to block senders for user {user_id} with provider {provider_name}")
 
         return success
+
+    def is_sender_blocked(self, email: str) -> bool:
+        """Check whether an address is in the local suppression list.
+
+        Distinct from block_senders/EmailProvider.block_senders (which
+        create durable, provider-side rules where supported): this is a
+        lightweight, provider-agnostic set that get_user_messages() also
+        filters against, so it's useful even for providers without any
+        server-side blocking capability.
+        """
+        return self.blocklist.is_blocked(email)
+
+    def block_sender(self, email: str) -> None:
+        """Add an address to the local suppression list (see is_sender_blocked)."""
+        self.blocklist.block(email)
+
+    def get_blocked_senders(self) -> Set[str]:
+        """Return the full local suppression list."""
+        return self.blocklist.get_all()
 
 # Import providers at the end to avoid circular imports
 # These imports must come after EmailProvider and EmailMessage are defined

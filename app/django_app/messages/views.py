@@ -72,7 +72,7 @@ def _perform_bulk_action(request, server: UnifiedEmailServer, action: str, selec
             success = server.delete_user_messages(user_id, provider_name, message_ids)
         else:  # deleteMessageBlockSender
             delete_success = server.delete_user_messages(user_id, provider_name, message_ids)
-            block_success = server.block_senders(user_id, provider_name, sender_names)
+            block_success = server.block_senders(user_id, provider_name, sender_names, source='django_web_messages')
             success = delete_success and block_success
             if delete_success and not block_success:
                 any_block_failed = True

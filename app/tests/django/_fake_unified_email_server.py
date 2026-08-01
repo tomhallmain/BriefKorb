@@ -89,8 +89,8 @@ class FakeUnifiedEmailServer:
         self.delete_user_messages_calls.append({'user_id': user_id, 'provider_name': provider_name, 'message_ids': message_ids})
         return self._delete_result
 
-    def block_senders(self, user_id: str, provider_name: str, sender_names: List[str]) -> bool:
-        self.block_senders_calls.append({'user_id': user_id, 'provider_name': provider_name, 'sender_names': sender_names})
+    def block_senders(self, user_id: str, provider_name: str, sender_names: List[str], source: str = 'api') -> bool:
+        self.block_senders_calls.append({'user_id': user_id, 'provider_name': provider_name, 'sender_names': sender_names, 'source': source})
         return self._block_result
 
 
