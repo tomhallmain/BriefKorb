@@ -143,23 +143,50 @@ def test_handle_auth_callback_returns_false_when_token_exchange_raises(tmp_path:
     assert server.handle_auth_callback('microsoft', 'user1', 'auth-code') is False
 
 
-def test_handle_auth_callback_reports_false_but_still_stores_token_for_gmail_shaped_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Documents current behavior: this method unconditionally reads
-    token_data['access_token'] to fetch user info, which is Microsoft's key
-    shape, not Gmail's ('token'). For a Gmail-shaped token this KeyErrors,
-    gets swallowed by the broad except, and handle_auth_callback reports
-    False -- indistinguishable from a real failure -- even though
-    store_token already succeeded and persisted the token.
+def test_handle_auth_callback_succeeds_for_gmail_shaped_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression test: token_data's access-token key is provider-shape
+    dependent (Microsoft: 'access_token', Gmail: 'token'). This used to read
+    token_data['access_token'] unconditionally, which KeyError'd on a
+    Gmail-shaped token, got swallowed by the broad except, and reported
+    False even though store_token had already succeeded -- indistinguishable
+    from a genuine failure. It now goes through TokenManager's
+    provider-agnostic get_valid_token() accessor instead.
     """
     server = _server(tmp_path, microsoft=False, gmail=True)
     provider = server.get_provider('gmail')
     gmail_shaped_token = {'token': 'gt', 'token_uri': 'https://oauth2.googleapis.com/token'}
     monkeypatch.setattr(provider.oauth, 'get_token_from_code', lambda code: gmail_shaped_token)
+    captured: Dict[str, Any] = {}
+
+    def fake_get_user_info(access_token: str) -> Dict[str, Any]:
+        captured['access_token'] = access_token
+        return {'emailAddress': 'user1@example.com'}
+
+    monkeypatch.setattr(provider.oauth, 'get_user_info', fake_get_user_info)
 
     result = server.handle_auth_callback('gmail', 'user1', 'auth-code')
 
-    assert result is False
+    assert result is True
+    assert captured['access_token'] == 'gt'
     assert server.token_manager.get_token('user1') == gmail_shaped_token
+    assert server.token_manager.get_user_info('user1') == {'emailAddress': 'user1@example.com'}
+
+
+def test_handle_auth_callback_returns_false_when_token_has_no_usable_access_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    provider = server.get_provider('microsoft')
+    token_without_access_token = {'msal_cache': 'x'}
+    monkeypatch.setattr(provider.oauth, 'get_token_from_code', lambda code: token_without_access_token)
+
+    def fail_if_called(access_token: str) -> Any:
+        raise AssertionError('get_user_info should not be called without a usable access token')
+
+    monkeypatch.setattr(provider.oauth, 'get_user_info', fail_if_called)
+
+    result = server.handle_auth_callback('microsoft', 'user1', 'auth-code')
+
+    assert result is False
+    assert server.token_manager.get_token('user1') == token_without_access_token
 
 
 # --- get_authenticated_providers / get_authenticated_users -------------------

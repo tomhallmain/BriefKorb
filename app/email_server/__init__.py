@@ -181,8 +181,15 @@ class UnifiedEmailServer:
             token_data = provider.oauth.get_token_from_code(auth_code)
             # Store token for the user
             provider.token_manager.store_token(user_id, token_data)
-            # Get and store user info
-            user_info = provider.oauth.get_user_info(token_data['access_token'])
+            # Get and store user info. token_data's access-token key is
+            # provider-shape-dependent (Microsoft: 'access_token', Gmail:
+            # 'token'), so use TokenManager's provider-agnostic accessor
+            # rather than assuming Microsoft's shape.
+            access_token = provider.token_manager.get_valid_token(token_data)
+            if not access_token:
+                logger.error(f"No usable access token in auth response for user {user_id} with provider {provider_name}")
+                return False
+            user_info = provider.oauth.get_user_info(access_token)
             provider.token_manager.store_user_info(user_id, user_info)
             logger.info(f"Successfully handled auth callback for user {user_id} with provider {provider_name}")
             return True
