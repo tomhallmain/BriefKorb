@@ -36,8 +36,7 @@ class ExternalApiToken:
 
 @dataclass
 class ExternalApiConfig:
-    """Config for BriefKorb's read-only external API (see
-    docs/external-message-api-spec.md).
+    """Config for BriefKorb's read-only external API.
 
     Deliberately a flat token registry rather than auth tied to one named
     consumer: any request bearing a token from `tokens` is authorized, so

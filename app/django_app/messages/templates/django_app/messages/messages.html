@@ -6,6 +6,11 @@
             <h1>Message Data</h1>
         </div>
     </div>
+    <p>
+        <a href="{% url 'django_app.messages:inbox' %}">Browse &amp; Read Messages &rarr;</a>
+        &nbsp;|&nbsp;
+        <a href="{% url 'django_app.messages:sender_categorization' %}">Sender Categorization &rarr;</a>
+    </p>
     <br>
     
     {% if messages %}

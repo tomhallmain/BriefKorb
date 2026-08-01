@@ -320,6 +320,47 @@ def test_get_messages_returns_empty_list_on_api_exception(tmp_path: Path) -> Non
     assert provider.get_messages('user1') == []
 
 
+# --- get_message --------------------------------------------------------------
+
+def test_get_message_returns_none_when_authentication_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider(tmp_path)
+    monkeypatch.setattr(provider, 'authenticate', lambda user_id: False)
+
+    assert provider.get_message('user1', 'm1') is None
+
+
+def test_get_message_returns_parsed_message_with_body(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    msg = _gmail_message('m1', subject='Hello', sender='alice@example.com', unread=False, html_body='<p>Hi</p>')
+    resource = FakeMessagesResource(get_results={'m1': msg})
+    provider._service = FakeGmailService(resource)
+
+    message = provider.get_message('user1', 'm1')
+
+    assert message is not None
+    assert message.id == 'm1'
+    assert message.subject == 'Hello'
+    assert message.body == '<p>Hi</p>'
+    assert message.is_read is True
+    assert message.provider == 'gmail'
+    assert resource.get_calls == [{'userId': 'me', 'id': 'm1', 'format': 'full'}]
+
+
+def test_get_message_returns_none_when_not_found(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    resource = FakeMessagesResource(get_results={})  # 'm1' not present -> KeyError inside get()
+    provider._service = FakeGmailService(resource)
+
+    assert provider.get_message('user1', 'm1') is None
+
+
+def test_get_message_returns_none_on_api_exception(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    provider._service = _ExplodingService()
+
+    assert provider.get_message('user1', 'm1') is None
+
+
 # --- send_message --------------------------------------------------------------
 
 def test_send_message_returns_false_when_authentication_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

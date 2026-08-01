@@ -73,14 +73,24 @@ class EmailProvider(ABC):
         pass
     
     @abstractmethod
-    def get_messages(self, 
+    def get_messages(self,
                     user_id: str,
                     folder: str = 'inbox',
                     max_messages: int = 100,
                     unread_only: bool = False) -> List[EmailMessage]:
         """Get messages from the specified folder for a user"""
         pass
-    
+
+    @abstractmethod
+    def get_message(self, user_id: str, message_id: str) -> Optional[EmailMessage]:
+        """Get a single message (including body) by id for a user.
+
+        Returns None if the message doesn't exist or can't be fetched --
+        callers shouldn't need to distinguish "deleted" from "transient
+        error" here.
+        """
+        pass
+
     @abstractmethod
     def send_message(self,
                     user_id: str,
@@ -344,6 +354,7 @@ class UnifiedEmailServer:
         folder: str = 'inbox',
         unread_only: bool = True,
         max_messages: int = 1000,
+        messages: Optional[List[EmailMessage]] = None,
     ) -> List[Dict[str, Any]]:
         """Aggregate messages from every authenticated provider into one row
         per sender, tagged with the source provider.
@@ -354,13 +365,20 @@ class UnifiedEmailServer:
         any caller -- adding a third provider means registering it (see
         _initialize_providers), not writing new aggregation code.
 
+        Pass `messages` (e.g. a list already fetched via get_user_messages())
+        to aggregate from it directly instead of fetching again -- useful for
+        callers that also want the raw per-message list themselves (a
+        message-reading view, entity extraction) and shouldn't pay for two
+        live fetches in one request.
+
         Deliberately does not apply sender-impact/spam categorization --
         that lives in SenderCategorizationManager (email_client.utils.
         sender_categorization), a layer above this one. Callers that want it
         annotate this method's output themselves (see
         django_app.messages.services.annotate_sender_impact).
         """
-        messages = self.get_user_messages(folder=folder, unread_only=unread_only, max_messages=max_messages)
+        if messages is None:
+            messages = self.get_user_messages(folder=folder, unread_only=unread_only, max_messages=max_messages)
 
         buckets: Dict[tuple, Dict[str, Any]] = {}
         for message in messages:
@@ -372,16 +390,25 @@ class UnifiedEmailServer:
             name, address = parseaddr(message.sender or '')
             name = name or 'Unknown'
             key = (message.provider, name)
+            last_received = message.received_date.isoformat() if message.received_date else ''
+            message_summary = {
+                'id': message.id,
+                'subject': message.subject,
+                'lastReceivedDateTime': last_received,
+                'isRead': message.is_read,
+            }
             if key in buckets:
                 buckets[key]['count'] += 1
+                buckets[key]['messages'].append(message_summary)
             else:
                 buckets[key] = {
                     'fromName': name,
                     'fromAddress': address,
                     'subject': message.subject,
-                    'lastReceivedDateTime': message.received_date.isoformat() if message.received_date else '',
+                    'lastReceivedDateTime': last_received,
                     'count': 1,
                     'provider': message.provider,
+                    'messages': [message_summary],
                 }
 
         return sorted(
@@ -389,6 +416,19 @@ class UnifiedEmailServer:
             key=lambda m: m['count'],
             reverse=True,
         )
+
+    def get_message(self, user_id: str, provider_name: str, message_id: str) -> Optional[EmailMessage]:
+        """Get a single message (including body) for a user via the named provider."""
+        provider = self.get_provider(provider_name)
+        if not provider:
+            logger.error(f"Provider not found: {provider_name}")
+            return None
+
+        if not provider.authenticate(user_id):
+            logger.warning(f"Authentication failed for user {user_id} with provider {provider_name}")
+            return None
+
+        return provider.get_message(user_id, message_id)
 
     def send_message(self,
                     user_id: str,

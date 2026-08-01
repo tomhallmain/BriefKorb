@@ -32,12 +32,12 @@ gmail:
 token_storage_path: "tokens"
 log_level: "INFO"
 
-# External read-only API settings (see docs/external-message-api-spec.md).
-# Disabled by default. Each entry in `tokens` authorizes one external
-# consumer to call BriefKorb's external-facing API (e.g. GET /api/messages);
-# `label` is free text used only for logging which consumer made a call --
-# it grants no permissions of its own. Add an entry per consumer; there is
-# no limit to how many may be registered.
+# External read-only API settings. Disabled by default. Each entry in
+# `tokens` authorizes one external consumer to call BriefKorb's
+# external-facing API (e.g. GET /api/messages); `label` is free text used
+# only for logging which consumer made a call -- it grants no permissions
+# of its own. Add an entry per consumer; there is no limit to how many may
+# be registered.
 external_api:
   enabled: false
   tokens: []

@@ -111,16 +111,72 @@ class MicrosoftGraphProvider(EmailProvider):
         
         return response
     
+    def _fetch_and_parse_message(self, headers: Dict[str, str], message_id: str) -> Optional[EmailMessage]:
+        """Fetch one message's full details (including body) by id and parse
+        it into an EmailMessage. Returns None on any failure -- callers
+        (get_messages()'s per-message loop, get_message()) both treat a
+        single unfetchable message as "skip it", not a hard error.
+        """
+        try:
+            msg_response = requests.get(
+                f"{self.base_url}/me/messages/{message_id}",
+                headers=headers,
+                params={
+                    '$select': 'id,subject,from,toRecipients,receivedDateTime,isRead,body,bodyPreview'
+                }
+            )
+            msg_response.raise_for_status()
+            full_msg = msg_response.json()
+
+            # Extract body - prefer HTML, fallback to bodyPreview (plain text)
+            body = ''
+            if 'body' in full_msg:
+                body_content = full_msg['body']
+                body = body_content.get('content', '')
+                content_type = body_content.get('contentType', 'text')
+                # If it's plain text, convert to HTML by escaping and preserving newlines
+                if content_type == 'text':
+                    body = html_escape.escape(body).replace('\n', '<br>')
+            elif 'bodyPreview' in full_msg:
+                # Fallback to plain text preview
+                body = html_escape.escape(full_msg['bodyPreview']).replace('\n', '<br>')
+
+            # Extract sender
+            sender_info = full_msg.get('from', {})
+            sender = sender_info.get('emailAddress', {}).get('address', 'Unknown') if sender_info else 'Unknown'
+
+            # Extract recipients
+            recipients = []
+            if 'toRecipients' in full_msg:
+                recipients = [r.get('emailAddress', {}).get('address', '') for r in full_msg['toRecipients']]
+
+            # Parse date
+            received_date = datetime.fromisoformat(full_msg['receivedDateTime'].replace('Z', '+00:00'))
+
+            return EmailMessage(
+                id=full_msg['id'],
+                subject=full_msg.get('subject', '(No Subject)'),
+                sender=sender,
+                recipients=recipients,
+                received_date=received_date,
+                body=body,
+                is_read=full_msg.get('isRead', False),
+                provider='microsoft'
+            )
+        except Exception as e:
+            logger.warning(f"Failed to get full message details for {message_id}: {e}")
+            return None
+
     def get_messages(self, user_id: str, folder: str = 'inbox', unread_only: bool = False, max_messages: int = 10) -> List[EmailMessage]:
         """Get messages from specified folder
-        
+
         Note: user_id is used to retrieve the token, but the API call uses /me
         which automatically resolves to the authenticated user for that token.
         """
         try:
             headers = self._get_headers(user_id)
             filter_query = "isRead eq false" if unread_only else None
-            
+
             # First, get message list with basic info
             response = requests.get(
                 f"{self.base_url}/me/mailFolders/{folder}/messages",
@@ -138,67 +194,28 @@ class MicrosoftGraphProvider(EmailProvider):
 
             message_list = response.json().get('value', [])
             messages = []
-            
+
             # Fetch full message details including body for each message
             for msg in message_list:
-                try:
-                    # Get full message with body content
-                    msg_response = requests.get(
-                        f"{self.base_url}/me/messages/{msg['id']}",
-                        headers=headers,
-                        params={
-                            '$select': 'id,subject,from,toRecipients,receivedDateTime,isRead,body,bodyPreview'
-                        }
-                    )
-                    msg_response.raise_for_status()
-                    full_msg = msg_response.json()
-                    
-                    # Extract body - prefer HTML, fallback to bodyPreview (plain text)
-                    body = ''
-                    if 'body' in full_msg:
-                        body_content = full_msg['body']
-                        body = body_content.get('content', '')
-                        content_type = body_content.get('contentType', 'text')
-                        # If it's plain text, convert to HTML by escaping and preserving newlines
-                        if content_type == 'text':
-                            body = html_escape.escape(body).replace('\n', '<br>')
-                    elif 'bodyPreview' in full_msg:
-                        # Fallback to plain text preview
-                        body = html_escape.escape(full_msg['bodyPreview']).replace('\n', '<br>')
-                    
-                    # Extract sender
-                    sender_info = full_msg.get('from', {})
-                    sender = sender_info.get('emailAddress', {}).get('address', 'Unknown') if sender_info else 'Unknown'
-                    
-                    # Extract recipients
-                    recipients = []
-                    if 'toRecipients' in full_msg:
-                        recipients = [r.get('emailAddress', {}).get('address', '') for r in full_msg['toRecipients']]
-                    
-                    # Parse date
-                    received_date = datetime.fromisoformat(full_msg['receivedDateTime'].replace('Z', '+00:00'))
-                    
-                    messages.append(EmailMessage(
-                        id=full_msg['id'],
-                        subject=full_msg.get('subject', '(No Subject)'),
-                        sender=sender,
-                        recipients=recipients,
-                        received_date=received_date,
-                        body=body,
-                        is_read=full_msg.get('isRead', False),
-                        provider='microsoft'
-                    ))
-                except Exception as e:
-                    logger.warning(f"Failed to get full message details for {msg.get('id', 'unknown')}: {e}")
-                    # Skip this message if we can't get full details
-                    continue
-            
+                parsed = self._fetch_and_parse_message(headers, msg['id'])
+                if parsed is not None:
+                    messages.append(parsed)
+
             logger.info(f"Retrieved {len(messages)} messages from {folder} for user {user_id}")
             return messages
         except Exception as e:
             logger.error(f"Failed to get messages for user {user_id}: {str(e)}")
             return []
-    
+
+    def get_message(self, user_id: str, message_id: str) -> Optional[EmailMessage]:
+        """Get a single message (including body) by id."""
+        try:
+            headers = self._get_headers(user_id)
+            return self._fetch_and_parse_message(headers, message_id)
+        except Exception as e:
+            logger.error(f"Failed to get message {message_id} for user {user_id}: {str(e)}")
+            return None
+
     def send_message(self, user_id: str, to: str, subject: str, body: str, cc: Optional[str] = None, bcc: Optional[str] = None) -> bool:
         """Send an email message"""
         try:

@@ -1,0 +1,88 @@
+{% extends "django_app/base.html" %}
+{% block content %}
+<div class="container mt-4">
+    <h1>Sender Categorization</h1>
+    <p><a href="{% url 'django_app.messages:messages' %}">&larr; Back to Messages</a></p>
+
+    {% if messages %}
+        {% for message in messages %}
+            <div class="alert alert-{{ message.tags }} alert-dismissible fade show" role="alert">
+                {{ message }}
+            </div>
+        {% endfor %}
+    {% endif %}
+
+    {% if error %}
+        <div class="alert alert-danger" role="alert">{{ error }}</div>
+    {% endif %}
+
+    <table class="table sortable">
+        <thead>
+            <tr>
+                <th scope="col">Sender</th>
+                <th scope="col">Domain</th>
+                <th scope="col">Impact</th>
+                <th scope="col">Source</th>
+                <th scope="col">Override?</th>
+                <th scope="col"></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for record in records %}
+                <tr>
+                    <td>{{ record.sender }}</td>
+                    <td>{{ record.domain }}</td>
+                    <td>
+                        <span class="badge {% if record.impact == 'high-impact' %}badge-danger{% elif record.impact == 'low-impact' %}badge-secondary{% else %}badge-light{% endif %}">
+                            {{ record.impact }}
+                        </span>
+                    </td>
+                    <td>{{ record.source }}</td>
+                    <td>{% if record.has_exception %}Yes{% else %}No{% endif %}</td>
+                    <td><a href="?sender={{ record.sender|urlencode }}">Details</a></td>
+                </tr>
+            {% empty %}
+                <tr>
+                    <td colspan="6" class="text-center text-muted">No sender records yet.</td>
+                </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    {% if selected_record %}
+        <div class="card mt-4">
+            <div class="card-body">
+                <h5 class="card-title">{{ selected_record.sender }}</h5>
+                <p class="card-text">
+                    <strong>Effective impact:</strong> {{ selected_record.impact }}<br>
+                    <strong>Inferred impact:</strong> {{ selected_record.inferred_impact }}<br>
+                    <strong>Source:</strong> {{ selected_record.source }}<br>
+                    <strong>Reason:</strong> {{ selected_record.reason|default:"n/a" }}<br>
+                    <strong>Confidence:</strong> {{ selected_record.confidence|default:"n/a" }}<br>
+                    <strong>Generic inference score:</strong> {{ selected_record.generic_inference_score }}<br>
+                    <strong>Blocklist inference score:</strong> {{ selected_record.blocklist_inference_score }}<br>
+                    <strong>Bot/spam inference score:</strong> {{ selected_record.bot_spam_inference_score }}
+                </p>
+
+                <h6>Decision trace</h6>
+                <ul>
+                    {% for step in selected_record.decision_trace %}
+                        <li>{{ step }}</li>
+                    {% empty %}
+                        <li class="text-muted">No trace recorded.</li>
+                    {% endfor %}
+                </ul>
+
+                <form method="post">
+                    {% csrf_token %}
+                    <button type="submit" name="setImpact" value="{{ selected_record.sender }}|high-impact" class="btn btn-outline-danger btn-sm">Mark High-Impact</button>
+                    <button type="submit" name="setImpact" value="{{ selected_record.sender }}|low-impact" class="btn btn-outline-secondary btn-sm">Mark Low-Impact</button>
+                    <button type="submit" name="clearImpact" value="{{ selected_record.sender }}" class="btn btn-outline-dark btn-sm">Clear Override</button>
+                </form>
+            </div>
+        </div>
+    {% elif selected_sender %}
+        <p class="text-muted mt-3">No record found for &ldquo;{{ selected_sender }}&rdquo;.</p>
+    {% endif %}
+</div>
+{% endblock %}

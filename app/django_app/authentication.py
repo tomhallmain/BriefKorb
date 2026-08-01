@@ -1,11 +1,11 @@
 """
 Authentication for BriefKorb's external-facing (non-session) API.
 
-See docs/external-message-api-spec.md. Any view meant to be called by an
-external consumer -- not a browser session -- should use
-`require_external_api_token` rather than Django's normal session/cookie
-auth. Not specific to the messages endpoint: this lives at the django_app
-level so any future external-facing view can reuse it.
+Any view meant to be called by an external consumer -- not a browser
+session -- should use `require_external_api_token` rather than Django's
+normal session/cookie auth. Not specific to the messages endpoint: this
+lives at the django_app level so any future external-facing view can
+reuse it.
 """
 
 import hmac

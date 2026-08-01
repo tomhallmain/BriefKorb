@@ -1,0 +1,55 @@
+{% extends "django_app/base.html" %}
+{% block content %}
+<div class="container mt-4">
+    <h1>Browse &amp; Read Messages</h1>
+    <p><a href="{% url 'django_app.messages:messages' %}">&larr; Back to Messages</a></p>
+
+    {% if error %}
+        <div class="alert alert-danger" role="alert">{{ error }}</div>
+    {% endif %}
+
+    {% if is_authenticated %}
+        <form method="get" class="form-inline mb-3">
+            <label class="mr-2">Mailbox:
+                <input type="text" name="mailbox" value="{{ mailbox }}" class="form-control ml-1" style="width: auto;">
+            </label>
+            <label class="mr-2 ml-3">
+                <input type="checkbox" name="unread_only" value="true" {% if unread_only %}checked{% endif %}>
+                Unread only
+            </label>
+            <button type="submit" class="btn btn-secondary btn-sm ml-2">Update</button>
+        </form>
+
+        <p>
+            Retrieved <strong>{{ messages_length }}</strong> message(s) across
+            <strong>{{ messageData|length }}</strong> sender(s).
+            {% if entity_count %}Found <strong>{{ entity_count }}</strong> new job posting(s).{% endif %}
+        </p>
+
+        {% for bucket in messageData %}
+            <details class="mb-2 border rounded p-2">
+                <summary>
+                    <strong>{{ bucket.fromName }}</strong> ({{ bucket.fromAddress }})
+                    <span class="badge badge-info">{{ bucket.provider }}</span>
+                    &mdash; {{ bucket.count }} message(s)
+                </summary>
+                <ul class="list-unstyled mt-2 mb-0">
+                    {% for m in bucket.messages %}
+                        <li>
+                            <a href="{% url 'django_app.messages:message_detail' provider=bucket.provider message_id=m.id %}">
+                                {{ m.subject }}
+                            </a>
+                            {% if m.lastReceivedDateTime %}
+                                <small class="text-muted">&mdash; {{ m.lastReceivedDateTime }}</small>
+                            {% endif %}
+                            {% if not m.isRead %}<span class="badge badge-primary">unread</span>{% endif %}
+                        </li>
+                    {% endfor %}
+                </ul>
+            </details>
+        {% empty %}
+            <p class="text-muted">No messages found.</p>
+        {% endfor %}
+    {% endif %}
+</div>
+{% endblock %}

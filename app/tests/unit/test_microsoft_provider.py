@@ -341,6 +341,51 @@ def test_get_messages_returns_empty_list_on_top_level_exception(tmp_path: Path, 
     assert provider.get_messages('user1') == []
 
 
+# --- get_message --------------------------------------------------------------
+
+def test_get_message_returns_none_when_not_authenticated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider(tmp_path)
+    monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: None)
+
+    assert provider.get_message('user1', 'm1') is None
+
+
+def test_get_message_returns_parsed_message_with_body(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider(tmp_path)
+    monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: {'access_token': 'at'})
+    full_msg = {
+        'id': 'm1', 'subject': 'Hello', 'isRead': False,
+        'from': {'emailAddress': {'address': 'alice@example.com'}},
+        'toRecipients': [{'emailAddress': {'address': 'bob@example.com'}}],
+        'receivedDateTime': '2024-01-01T12:00:00Z',
+        'body': {'content': '<p>Hi</p>', 'contentType': 'html'},
+    }
+    captured: Dict[str, Any] = {}
+
+    def fake_get(url: str, headers: Any = None, params: Any = None) -> _FakeResponse:
+        captured['url'] = url
+        return _FakeResponse(json_data=full_msg)
+
+    monkeypatch.setattr(microsoft_provider_module.requests, 'get', fake_get)
+
+    message = provider.get_message('user1', 'm1')
+
+    assert message is not None
+    assert message.id == 'm1'
+    assert message.subject == 'Hello'
+    assert message.body == '<p>Hi</p>'
+    assert message.provider == 'microsoft'
+    assert captured['url'] == f'{provider.base_url}/me/messages/m1'
+
+
+def test_get_message_returns_none_when_fetch_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider(tmp_path)
+    monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: {'access_token': 'at'})
+    monkeypatch.setattr(microsoft_provider_module.requests, 'get', lambda url, headers=None, params=None: _FakeResponse(status_code=404))
+
+    assert provider.get_message('user1', 'does-not-exist') is None
+
+
 # --- send_message --------------------------------------------------------------
 
 def test_send_message_returns_false_when_not_authenticated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

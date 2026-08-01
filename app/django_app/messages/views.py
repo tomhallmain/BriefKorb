@@ -2,9 +2,10 @@
 Messages views for BriefKorb web interface
 """
 
-from django.shortcuts import render
+from django.shortcuts import redirect, render
 from django.contrib import messages as django_messages
 from django.http import JsonResponse
+from django.urls import reverse
 from django.views.decorators.http import require_GET
 from dateutil import parser
 from pathlib import Path
@@ -233,11 +234,11 @@ def _parse_bool_param(request, name: str, default: bool) -> bool:
 @require_GET
 @require_external_api_token
 def messages_api_view(request):
-    """Read-only JSON endpoint for external consumers (see
-    docs/external-message-api-spec.md). Returns messages aggregated by
-    sender -- the same shape the HTML messages view renders, just as JSON
-    instead of a template. Not tied to any single named caller: any request
-    carrying a token from `external_api.tokens` is authorized.
+    """Read-only JSON endpoint for external consumers. Returns messages
+    aggregated by sender -- the same shape the HTML messages view renders,
+    just as JSON instead of a template. Not tied to any single named
+    caller: any request carrying a token from `external_api.tokens` is
+    authorized.
 
     Aggregation across every provider this BriefKorb instance has an
     authenticated mailbox user for (Microsoft and/or Gmail) is handled by
@@ -283,3 +284,147 @@ def messages_api_view(request):
         ]
 
     return JsonResponse({'messages': message_data})
+
+
+def _no_provider_configured(config: EmailServerConfig) -> bool:
+    return not (config.microsoft.enabled or config.gmail.enabled)
+
+
+@require_GET
+def inbox_view(request):
+    """Browse and read individual messages across every authenticated
+    provider (Microsoft and/or Gmail) -- unlike messages_view, which only
+    ever shows Microsoft-sourced aggregate sender buckets via the older
+    MessagesService path. Built on UnifiedEmailServer, the same layer
+    messages_api_view uses, so this naturally covers Gmail too with no
+    per-provider code here. messages_view's own aggregate table and bulk
+    actions are deliberately left on their existing MessagesService path in
+    this pass -- migrating those touches more tested, primary-path code
+    than adding this new, additive view does."""
+    app_dir = Path(__file__).parent.parent.parent
+    config_path = EmailServerConfig.resolve_path(app_dir)
+    if not config_path.exists():
+        return render(request, 'django_app/messages/inbox.html', {
+            'messageData': [], 'is_authenticated': False,
+            'error': 'BriefKorb is not configured on this instance.',
+        })
+    config = EmailServerConfig.from_file(str(config_path))
+    if _no_provider_configured(config):
+        return render(request, 'django_app/messages/inbox.html', {
+            'messageData': [], 'is_authenticated': False,
+            'error': 'No email provider is configured on this BriefKorb instance.',
+        })
+
+    mailbox = request.GET.get('mailbox', 'inbox')
+    unread_only = _parse_bool_param(request, 'unread_only', default=True)
+
+    try:
+        server = UnifiedEmailServer(config=config)
+        if not server.get_authenticated_providers():
+            return render(request, 'django_app/messages/inbox.html', {
+                'messageData': [], 'is_authenticated': False,
+                'error': 'Please authenticate with Microsoft or Gmail first. Use the BriefKorb desktop app to authenticate.',
+            })
+        messages = server.get_user_messages(folder=mailbox, unread_only=unread_only, max_messages=1000)
+        message_data = server.get_message_digest(messages=messages)
+        # Non-fatal if entity_graph is unavailable -- extract_entities()
+        # already returns 0 in that case rather than raising.
+        entity_count = server.extract_entities(messages)
+    except Exception as e:
+        return render(request, 'django_app/messages/inbox.html', {
+            'messageData': [], 'is_authenticated': False, 'error': str(e),
+        })
+
+    return render(request, 'django_app/messages/inbox.html', {
+        'messageData': message_data,
+        'messages_length': len(messages),
+        'mailbox': mailbox,
+        'unread_only': unread_only,
+        'entity_count': entity_count,
+        'is_authenticated': True,
+    })
+
+
+@require_GET
+def message_detail_view(request, provider, message_id):
+    """Read a single message's full body -- the drill-down target from
+    inbox_view's per-sender message list."""
+    app_dir = Path(__file__).parent.parent.parent
+    config_path = EmailServerConfig.resolve_path(app_dir)
+    if not config_path.exists():
+        return render(request, 'django_app/messages/message_detail.html', {
+            'error': 'BriefKorb is not configured on this instance.',
+        })
+    config = EmailServerConfig.from_file(str(config_path))
+
+    try:
+        server = UnifiedEmailServer(config=config)
+        authenticated = server.get_authenticated_providers(provider)
+        if not authenticated:
+            return render(request, 'django_app/messages/message_detail.html', {
+                'error': f'No authenticated {provider} mailbox user is configured on this BriefKorb instance.',
+            })
+        message = server.get_message(authenticated[0].user_id, provider, message_id)
+    except Exception as e:
+        return render(request, 'django_app/messages/message_detail.html', {'error': str(e)})
+
+    if message is None:
+        return render(request, 'django_app/messages/message_detail.html', {
+            'error': 'Message not found -- it may have been deleted, or the provider is unavailable.',
+        })
+
+    return render(request, 'django_app/messages/message_detail.html', {'message': message})
+
+
+def sender_categorization_view(request):
+    """Browse every sender categorization record, inspect why a sender was
+    categorized a given way (its decision trace), and apply/clear a
+    per-sender impact override -- the same SenderCategorizationManager data
+    and controls messages_view's inline setImpact/clearImpact already use,
+    as a dedicated browse/inspect page rather than only an inline action.
+
+    Constructs SenderCategorizationManager directly rather than via
+    MessagesService, the same reason messages_api_view does: categorization
+    doesn't depend on Microsoft being configured, and gating it behind a
+    Microsoft-only service would make this page unusable on a Gmail-only
+    instance for no real reason.
+    """
+    app_dir = Path(__file__).parent.parent.parent
+    config_path = EmailServerConfig.resolve_path(app_dir)
+    if not config_path.exists():
+        return render(request, 'django_app/messages/sender_categorization.html', {
+            'records': [], 'error': 'BriefKorb is not configured on this instance.',
+        })
+    config = EmailServerConfig.from_file(str(config_path))
+    sender_categorization = SenderCategorizationManager(config.token_storage_path)
+
+    if request.method == 'POST':
+        set_impact_value = request.POST.get('setImpact', '').strip()
+        clear_impact_sender = request.POST.get('clearImpact', '').strip()
+        if set_impact_value:
+            try:
+                sender, impact = set_impact_value.split('|', 1)
+                sender = sender.strip().lower()
+                sender_categorization.set_sender_exception(sender, ImpactLevel(impact), source='django_categorization_page')
+                django_messages.success(request, f"Updated impact override for {sender}.")
+            except ValueError:
+                django_messages.error(request, "Invalid impact update request.")
+        elif clear_impact_sender:
+            sender = clear_impact_sender.strip().lower()
+            sender_categorization.clear_sender_exception(sender)
+            django_messages.success(request, f"Cleared impact override for {sender}.")
+        redirect_url = reverse('django_app.messages:sender_categorization')
+        if clear_impact_sender or set_impact_value:
+            selected = clear_impact_sender or set_impact_value.split('|', 1)[0]
+            redirect_url += f'?sender={selected.strip().lower()}'
+        return redirect(redirect_url)
+
+    records = sender_categorization.list_sender_records()
+    selected_sender = request.GET.get('sender', '').strip().lower()
+    selected_record = next((r for r in records if r['sender'] == selected_sender), None) if selected_sender else None
+
+    return render(request, 'django_app/messages/sender_categorization.html', {
+        'records': records,
+        'selected_record': selected_record,
+        'selected_sender': selected_sender,
+    })

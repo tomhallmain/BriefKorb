@@ -564,3 +564,72 @@ def test_get_message_digest_passes_through_folder_unread_only_and_max_messages(t
     assert captured['folder'] == 'archive'
     assert captured['unread_only'] is False
     assert captured['max_messages'] == 50
+
+
+def test_get_message_digest_aggregates_from_given_messages_without_fetching(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    provider = server.get_provider('microsoft')
+
+    def fail_if_called(**kwargs: Any) -> Any:
+        raise AssertionError('should not fetch when messages= is given')
+
+    monkeypatch.setattr(provider, 'get_messages', fail_if_called)
+    messages = [_message('m1', datetime(2024, 1, 1, tzinfo=timezone.utc))]
+
+    digest = server.get_message_digest(messages=messages)
+
+    assert len(digest) == 1
+    assert digest[0]['count'] == 1
+
+
+def test_get_message_digest_bucket_carries_per_message_summaries(tmp_path: Path) -> None:
+    server = _server(tmp_path)
+    m1 = _message('m1', datetime(2024, 1, 1, tzinfo=timezone.utc))
+    m1.is_read = False
+    m2 = _message('m2', datetime(2024, 1, 2, tzinfo=timezone.utc))
+    m2.is_read = True
+
+    digest = server.get_message_digest(messages=[m1, m2])
+
+    assert len(digest) == 1
+    bucket = digest[0]
+    assert bucket['count'] == 2
+    assert {s['id'] for s in bucket['messages']} == {'m1', 'm2'}
+    m1_summary = next(s for s in bucket['messages'] if s['id'] == 'm1')
+    assert m1_summary['isRead'] is False
+    assert m1_summary['subject'] == 'S'
+    assert m1_summary['lastReceivedDateTime'] == m1.received_date.isoformat()
+
+
+# --- get_message --------------------------------------------------------------
+
+def test_get_message_returns_none_for_unknown_provider(tmp_path: Path) -> None:
+    server = _server(tmp_path)
+    assert server.get_message('user1', 'does-not-exist', 'm1') is None
+
+
+def test_get_message_returns_none_when_authentication_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    provider = server.get_provider('microsoft')
+    monkeypatch.setattr(provider, 'authenticate', lambda user_id: False)
+
+    assert server.get_message('user1', 'microsoft', 'm1') is None
+
+
+def test_get_message_delegates_to_provider_when_authenticated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    provider = server.get_provider('microsoft')
+    monkeypatch.setattr(provider, 'authenticate', lambda user_id: True)
+    expected = _message('m1', datetime(2024, 1, 1, tzinfo=timezone.utc))
+    captured: Dict[str, Any] = {}
+
+    def fake_get_message(user_id: str, message_id: str) -> Any:
+        captured.update(user_id=user_id, message_id=message_id)
+        return expected
+
+    monkeypatch.setattr(provider, 'get_message', fake_get_message)
+
+    result = server.get_message('user1', 'microsoft', 'm1')
+
+    assert result is expected
+    assert captured == {'user_id': 'user1', 'message_id': 'm1'}

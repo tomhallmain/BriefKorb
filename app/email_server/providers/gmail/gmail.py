@@ -85,7 +85,73 @@ class GmailProvider(EmailProvider):
             logger.debug(f"Authentication check for user {user_id}: {str(e)}")
             return False
     
-    def get_messages(self, 
+    def _parse_message_response(self, message: Dict) -> EmailMessage:
+        """Parse a Gmail API 'full' format message resource into an
+        EmailMessage. Pure parsing, no API call -- shared by get_messages()'s
+        per-message loop and get_message()'s single-message fetch.
+        """
+        headers = message['payload']['headers']
+        subject = next((h['value'] for h in headers if h['name'] == 'Subject'), '(No Subject)')
+        sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown')
+        date_str = next((h['value'] for h in headers if h['name'] == 'Date'), None)
+        to = next((h['value'] for h in headers if h['name'] == 'To'), '')
+
+        # Parse date - use email.utils.parsedate_to_datetime which handles various formats including GMT
+        received_date = None
+        if date_str:
+            try:
+                # parsedate_to_datetime handles RFC 2822 dates including GMT, EST, etc.
+                received_date = parsedate_to_datetime(date_str)
+            except (ValueError, TypeError) as e:
+                # Fallback to current time if parsing fails
+                logger.warning(f"Could not parse date '{date_str}': {e}, using current time")
+                received_date = datetime.now(timezone.utc)
+        else:
+            received_date = datetime.now(timezone.utc)
+        received_date = normalize_received_at_utc(received_date)
+
+        # Get message body - prefer HTML over plain text
+        body = ''
+        plain_text_body = ''
+        if 'parts' in message['payload']:
+            for part in message['payload']['parts']:
+                if part['mimeType'] == 'text/html' and 'body' in part and 'data' in part['body']:
+                    # Prefer HTML content
+                    body = base64.urlsafe_b64decode(
+                        part['body']['data']
+                    ).decode('utf-8')
+                elif part['mimeType'] == 'text/plain' and 'body' in part and 'data' in part['body']:
+                    # Store plain text as fallback
+                    if not body:
+                        plain_text_body = base64.urlsafe_b64decode(
+                            part['body']['data']
+                        ).decode('utf-8')
+        elif 'body' in message['payload'] and 'data' in message['payload']['body']:
+            mime_type = message['payload'].get('mimeType', 'text/plain')
+            body_data = base64.urlsafe_b64decode(
+                message['payload']['body']['data']
+            ).decode('utf-8')
+            if mime_type == 'text/html':
+                body = body_data
+            else:
+                plain_text_body = body_data
+
+        # Use plain text as fallback if no HTML found
+        if not body and plain_text_body:
+            body = plain_text_body
+
+        return EmailMessage(
+            id=message['id'],
+            subject=subject,
+            sender=sender,
+            recipients=to.split(',') if to else [],
+            received_date=received_date,
+            body=body,
+            is_read='UNREAD' not in message['labelIds'],
+            provider='gmail'
+        )
+
+    def get_messages(self,
                     user_id: str,
                     folder: str = 'inbox',
                     max_messages: int = 100,
@@ -95,18 +161,18 @@ class GmailProvider(EmailProvider):
             if not self.authenticate(user_id):
                 logger.error(f"Failed to authenticate user {user_id} for message retrieval")
                 return []
-        
+
         query = 'in:inbox'
         if unread_only:
             query += ' is:unread'
-        
+
         try:
             results = self._service.users().messages().list(
                 userId='me',
                 q=query,
                 maxResults=max_messages
             ).execute()
-            
+
             messages = []
             for msg in results.get('messages', []):
                 message = self._service.users().messages().get(
@@ -114,74 +180,32 @@ class GmailProvider(EmailProvider):
                     id=msg['id'],
                     format='full'
                 ).execute()
-                
-                headers = message['payload']['headers']
-                subject = next((h['value'] for h in headers if h['name'] == 'Subject'), '(No Subject)')
-                sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown')
-                date_str = next((h['value'] for h in headers if h['name'] == 'Date'), None)
-                to = next((h['value'] for h in headers if h['name'] == 'To'), '')
-                
-                # Parse date - use email.utils.parsedate_to_datetime which handles various formats including GMT
-                received_date = None
-                if date_str:
-                    try:
-                        # parsedate_to_datetime handles RFC 2822 dates including GMT, EST, etc.
-                        received_date = parsedate_to_datetime(date_str)
-                    except (ValueError, TypeError) as e:
-                        # Fallback to current time if parsing fails
-                        logger.warning(f"Could not parse date '{date_str}': {e}, using current time")
-                        received_date = datetime.now(timezone.utc)
-                else:
-                    received_date = datetime.now(timezone.utc)
-                received_date = normalize_received_at_utc(received_date)
-                
-                # Get message body - prefer HTML over plain text
-                body = ''
-                plain_text_body = ''
-                if 'parts' in message['payload']:
-                    for part in message['payload']['parts']:
-                        if part['mimeType'] == 'text/html' and 'body' in part and 'data' in part['body']:
-                            # Prefer HTML content
-                            body = base64.urlsafe_b64decode(
-                                part['body']['data']
-                            ).decode('utf-8')
-                        elif part['mimeType'] == 'text/plain' and 'body' in part and 'data' in part['body']:
-                            # Store plain text as fallback
-                            if not body:
-                                plain_text_body = base64.urlsafe_b64decode(
-                                    part['body']['data']
-                                ).decode('utf-8')
-                elif 'body' in message['payload'] and 'data' in message['payload']['body']:
-                    mime_type = message['payload'].get('mimeType', 'text/plain')
-                    body_data = base64.urlsafe_b64decode(
-                        message['payload']['body']['data']
-                    ).decode('utf-8')
-                    if mime_type == 'text/html':
-                        body = body_data
-                    else:
-                        plain_text_body = body_data
-                
-                # Use plain text as fallback if no HTML found
-                if not body and plain_text_body:
-                    body = plain_text_body
-                
-                messages.append(EmailMessage(
-                    id=message['id'],
-                    subject=subject,
-                    sender=sender,
-                    recipients=to.split(',') if to else [],
-                    received_date=received_date,
-                    body=body,
-                    is_read='UNREAD' not in message['labelIds'],
-                    provider='gmail'
-                ))
-            
+                messages.append(self._parse_message_response(message))
+
             logger.info(f"Retrieved {len(messages)} messages from {folder} for user {user_id}")
             return messages
         except Exception as e:
             logger.error(f"Failed to get messages for user {user_id}: {str(e)}")
             return []
-    
+
+    def get_message(self, user_id: str, message_id: str) -> Optional[EmailMessage]:
+        """Get a single message (including body) by id."""
+        if not self._service:
+            if not self.authenticate(user_id):
+                logger.error(f"Failed to authenticate user {user_id} for message retrieval")
+                return None
+
+        try:
+            message = self._service.users().messages().get(
+                userId='me',
+                id=message_id,
+                format='full'
+            ).execute()
+            return self._parse_message_response(message)
+        except Exception as e:
+            logger.error(f"Failed to get message {message_id} for user {user_id}: {str(e)}")
+            return None
+
     def send_message(self,
                     user_id: str,
                     to: Union[str, List[str]],

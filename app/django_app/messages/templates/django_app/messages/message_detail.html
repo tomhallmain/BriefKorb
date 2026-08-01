@@ -1,0 +1,28 @@
+{% extends "django_app/base.html" %}
+{% block content %}
+<div class="container mt-4">
+    <p><a href="{% url 'django_app.messages:inbox' %}">&larr; Back to Inbox</a></p>
+
+    {% if error %}
+        <div class="alert alert-danger" role="alert">{{ error }}</div>
+    {% elif message %}
+        <h2>{{ message.subject }}</h2>
+        <p>
+            <strong>From:</strong> {{ message.sender }}<br>
+            <strong>To:</strong> {{ message.recipients|join:", " }}<br>
+            <strong>Received:</strong> {{ message.received_date|date:"N j, Y, g:i A" }}<br>
+            <strong>Provider:</strong> {{ message.provider }}
+        </p>
+        <!--
+        sandbox="" is deliberate: email bodies are attacker-influenced HTML.
+        An empty sandbox blocks script execution, form submission, and
+        top-navigation, and treats the content as an opaque, cookie-less
+        origin. It does NOT block the iframe's own network requests (e.g.
+        remote <img> tags can still act as read receipts/tracking pixels) --
+        that would need proxying/inlining images server-side to close, which
+        isn't done here.
+        -->
+        <iframe sandbox="" srcdoc="{{ message.body }}" style="width: 100%; min-height: 500px; border: 1px solid #ced4da; background: #fff;"></iframe>
+    {% endif %}
+</div>
+{% endblock %}
