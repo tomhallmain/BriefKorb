@@ -20,6 +20,32 @@ from email_server.blocked_sender_tracking import BlockedSenderTracker, BlockEven
 from email_client.utils.sender_categorization import SenderCategorizationManager, ImpactLevel
 
 
+def annotate_sender_impact(message_data: List[Dict[str, Any]], sender_categorization: SenderCategorizationManager) -> List[Dict[str, Any]]:
+    """Infer and annotate sender impact for message groups.
+
+    Free function, not a MessagesService method, so it can annotate buckets
+    aggregated from any provider -- MessagesService.annotate_sender_impact
+    delegates to this using its own (Microsoft-configured) instance's
+    sender_categorization; messages_api_view (which aggregates via
+    UnifiedEmailServer.get_message_digest(), not MessagesService, so a
+    Microsoft-configured instance may not exist) calls this directly with an
+    independently-constructed SenderCategorizationManager instead.
+    """
+    for message_info in message_data:
+        sender_address = (message_info.get('fromAddress') or '').strip().lower()
+        if not sender_address:
+            continue
+        subject = message_info.get('subject') or ''
+        inference = sender_categorization.infer_for_sender(sender_address, [subject])
+        sender_categorization.set_inferred_sender_impact(sender_address, inference)
+        message_info['impact'] = sender_categorization.get_sender_impact(sender_address).value
+        message_info['genericInferenceScore'] = inference.generic_inference_score
+        message_info['blocklistInferenceScore'] = inference.blocklist_inference_score
+        message_info['botSpamInferenceScore'] = inference.bot_spam_inference_score
+        message_info['hasImpactException'] = sender_categorization.has_sender_exception(sender_address)
+    return message_data
+
+
 class MessagesService:
     """Service for Microsoft Messages operations"""
     
@@ -155,12 +181,23 @@ class MessagesService:
         
         return messages[:max_messages]
     
-    def aggregate_messages_by_sender(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    @staticmethod
+    def aggregate_messages_by_sender(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Aggregate messages by sender name
-        
+
+        Doesn't touch any instance state, so it's a staticmethod. Operates
+        on Microsoft Graph's raw per-message JSON shape (the shape
+        MessagesService.get_messages() returns) -- this is the HTML
+        messages_view's aggregation path specifically, not a general
+        provider-agnostic one. The external API (messages_api_view)
+        aggregates via UnifiedEmailServer.get_message_digest()
+        (email_server/__init__.py) instead, which is genuinely
+        provider-agnostic: it groups the unified EmailMessage shape used
+        across every provider, rather than a Microsoft-Graph-specific dict.
+
         Args:
             messages: List of message dictionaries
-            
+
         Returns:
             List of aggregated message info dictionaries
         """
@@ -201,19 +238,7 @@ class MessagesService:
 
     def annotate_sender_impact(self, message_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Infer and annotate sender impact for message groups."""
-        for message_info in message_data:
-            sender_address = (message_info.get('fromAddress') or '').strip().lower()
-            if not sender_address:
-                continue
-            subject = message_info.get('subject') or ''
-            inference = self.sender_categorization.infer_for_sender(sender_address, [subject])
-            self.sender_categorization.set_inferred_sender_impact(sender_address, inference)
-            message_info['impact'] = self.sender_categorization.get_sender_impact(sender_address).value
-            message_info['genericInferenceScore'] = inference.generic_inference_score
-            message_info['blocklistInferenceScore'] = inference.blocklist_inference_score
-            message_info['botSpamInferenceScore'] = inference.bot_spam_inference_score
-            message_info['hasImpactException'] = self.sender_categorization.has_sender_exception(sender_address)
-        return message_data
+        return annotate_sender_impact(message_data, self.sender_categorization)
 
     def extract_entities(self, messages) -> int:
         """Run entity extraction over a list of EmailMessage objects.

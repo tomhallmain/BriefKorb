@@ -6,7 +6,8 @@ This module provides a unified interface for interacting with different email pr
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Dict, Optional, Union, TYPE_CHECKING
+from email.utils import parseaddr
+from typing import Any, List, Dict, Optional, Union, TYPE_CHECKING
 from datetime import datetime
 from dataclasses import dataclass
 from .config import EmailServerConfig, create_default_config
@@ -337,7 +338,58 @@ class UnifiedEmailServer:
             m.received_date = normalize_received_at_utc(m.received_date)
 
         return sorted(messages, key=lambda x: x.received_date, reverse=True)
-    
+
+    def get_message_digest(
+        self,
+        folder: str = 'inbox',
+        unread_only: bool = True,
+        max_messages: int = 1000,
+    ) -> List[Dict[str, Any]]:
+        """Aggregate messages from every authenticated provider into one row
+        per sender, tagged with the source provider.
+
+        Built on get_user_messages(), so it's provider-agnostic *and*
+        provider-count-agnostic: it covers however many providers are
+        registered/authenticated with no per-provider branching here or in
+        any caller -- adding a third provider means registering it (see
+        _initialize_providers), not writing new aggregation code.
+
+        Deliberately does not apply sender-impact/spam categorization --
+        that lives in SenderCategorizationManager (email_client.utils.
+        sender_categorization), a layer above this one. Callers that want it
+        annotate this method's output themselves (see
+        django_app.messages.services.annotate_sender_impact).
+        """
+        messages = self.get_user_messages(folder=folder, unread_only=unread_only, max_messages=max_messages)
+
+        buckets: Dict[tuple, Dict[str, Any]] = {}
+        for message in messages:
+            # EmailMessage.sender isn't consistently shaped across providers
+            # (Microsoft's provider strips it down to a bare address; Gmail's
+            # keeps the raw, possibly-"Name <addr>" From header) -- parseaddr
+            # handles both forms uniformly rather than needing a per-provider
+            # extraction path.
+            name, address = parseaddr(message.sender or '')
+            name = name or 'Unknown'
+            key = (message.provider, name)
+            if key in buckets:
+                buckets[key]['count'] += 1
+            else:
+                buckets[key] = {
+                    'fromName': name,
+                    'fromAddress': address,
+                    'subject': message.subject,
+                    'lastReceivedDateTime': message.received_date.isoformat() if message.received_date else '',
+                    'count': 1,
+                    'provider': message.provider,
+                }
+
+        return sorted(
+            sorted(buckets.values(), key=lambda m: m['fromName']),
+            key=lambda m: m['count'],
+            reverse=True,
+        )
+
     def send_message(self,
                     user_id: str,
                     provider_name: str,

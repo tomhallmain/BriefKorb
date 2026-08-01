@@ -12,10 +12,11 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+from email_server import UnifiedEmailServer
 from email_server.config import EmailServerConfig
 from email_server.auth import TokenManager
-from email_client.utils.sender_categorization import ImpactLevel
-from .services import MessagesService
+from email_client.utils.sender_categorization import ImpactLevel, SenderCategorizationManager
+from .services import MessagesService, annotate_sender_impact
 from django_app.calendar.services import get_iana_from_windows
 from django_app.authentication import require_external_api_token
 
@@ -238,40 +239,47 @@ def messages_api_view(request):
     instead of a template. Not tied to any single named caller: any request
     carrying a token from `external_api.tokens` is authorized.
 
-    Cost note for callers: each call is a live Microsoft Graph fetch
-    against BriefKorb's own token quota, not a cheap local/cached query.
-    Poll infrequently -- on the order of hours, not per-page-load."""
-    user_id = _get_authenticated_user_id(request)
-    if not user_id:
-        return JsonResponse(
-            {'error': 'No authenticated mailbox user is configured on this BriefKorb instance.'},
-            status=503,
-        )
+    Aggregation across every provider this BriefKorb instance has an
+    authenticated mailbox user for (Microsoft and/or Gmail) is handled by
+    UnifiedEmailServer.get_message_digest() (email_server/__init__.py) --
+    aggregation across accounts/providers is this application's whole
+    reason for being, and that's where "the server" (as opposed to this
+    Django view, which is just one interface onto it) implements it, so a
+    third provider needs no new code here. Each returned bucket carries a
+    `provider` field so callers can tell the source apart.
+
+    Cost note for callers: each call is one or more live Graph/Gmail API
+    fetches against BriefKorb's own token quota, not a cheap local/cached
+    query. Poll infrequently -- on the order of hours, not per-page-load."""
+    app_dir = Path(__file__).parent.parent.parent
+    config_path = EmailServerConfig.resolve_path(app_dir)
+    if not config_path.exists():
+        return JsonResponse({'error': 'BriefKorb is not configured on this instance.'}, status=503)
+    config = EmailServerConfig.from_file(str(config_path))
+    if not (config.microsoft.enabled or config.gmail.enabled):
+        return JsonResponse({'error': 'No email provider is configured on this BriefKorb instance.'}, status=503)
 
     mailbox = request.GET.get('mailbox', 'inbox')
     unread_only = _parse_bool_param(request, 'unread_only', default=True)
     high_impact_only = _parse_bool_param(request, 'high_impact_only', default=False)
 
     try:
-        messages_service = MessagesService(user_id)
-        user_info = messages_service.get_user_info()
-        user_timezone = user_info.get('mailboxSettings', {}).get('timeZone') or 'UTC'
-        iana_timezone = get_iana_from_windows(user_timezone)
-
-        messages = messages_service.get_messages(
-            mailbox=mailbox,
-            exclude_read=unread_only,
-            max_messages=1000,
-            timezone=iana_timezone,
-        )
-        message_data = messages_service.aggregate_messages_by_sender(messages)
-        message_data = messages_service.annotate_sender_impact(message_data)
-        if high_impact_only:
-            message_data = [
-                msg_info for msg_info in message_data
-                if msg_info.get('impact') == ImpactLevel.HIGH_IMPACT.value
-            ]
+        server = UnifiedEmailServer(config=config)
+        if not server.get_authenticated_providers():
+            return JsonResponse(
+                {'error': 'No authenticated mailbox user is configured on this BriefKorb instance.'},
+                status=503,
+            )
+        message_data = server.get_message_digest(folder=mailbox, unread_only=unread_only, max_messages=1000)
+        sender_categorization = SenderCategorizationManager(config.token_storage_path)
+        message_data = annotate_sender_impact(message_data, sender_categorization)
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=502)
+
+    if high_impact_only:
+        message_data = [
+            msg_info for msg_info in message_data
+            if msg_info.get('impact') == ImpactLevel.HIGH_IMPACT.value
+        ]
 
     return JsonResponse({'messages': message_data})

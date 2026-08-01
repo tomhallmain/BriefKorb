@@ -449,3 +449,118 @@ def test_extract_entities_delegates_to_manager_when_available(tmp_path: Path) ->
 
     assert result == 3
     assert fake_manager.process_messages_calls == [messages]
+
+
+# --- get_message_digest -------------------------------------------------------
+
+def test_get_message_digest_returns_empty_list_when_no_messages(tmp_path: Path) -> None:
+    server = _server(tmp_path)
+    assert server.get_message_digest() == []
+
+
+def test_get_message_digest_aggregates_by_sender_and_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    provider = server.get_provider('microsoft')
+    server.token_manager.store_token('user1', {'access_token': 'at'})
+    monkeypatch.setattr(provider, 'authenticate', lambda user_id: True)
+    monkeypatch.setattr(provider, 'get_messages', lambda **kwargs: [
+        _message('m1', datetime(2024, 1, 1, tzinfo=timezone.utc)),
+        _message('m2', datetime(2024, 1, 2, tzinfo=timezone.utc)),
+    ])
+
+    digest = server.get_message_digest()
+
+    assert len(digest) == 1
+    assert digest[0]['count'] == 2
+    assert digest[0]['provider'] == 'microsoft'
+
+
+def test_get_message_digest_parses_display_name_and_address(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    provider = server.get_provider('microsoft')
+    server.token_manager.store_token('user1', {'access_token': 'at'})
+    monkeypatch.setattr(provider, 'authenticate', lambda user_id: True)
+    message = _message('m1', datetime(2024, 1, 1, tzinfo=timezone.utc))
+    message.sender = 'Alice Smith <alice@example.com>'
+    monkeypatch.setattr(provider, 'get_messages', lambda **kwargs: [message])
+
+    digest = server.get_message_digest()
+
+    assert digest[0]['fromName'] == 'Alice Smith'
+    assert digest[0]['fromAddress'] == 'alice@example.com'
+
+
+def test_get_message_digest_falls_back_to_unknown_name_for_bare_address_sender(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Microsoft's provider strips EmailMessage.sender down to a bare
+    address (no display name), unlike Gmail's raw From header -- this must
+    still produce a usable bucket rather than erroring or mis-parsing."""
+    server = _server(tmp_path)
+    provider = server.get_provider('microsoft')
+    server.token_manager.store_token('user1', {'access_token': 'at'})
+    monkeypatch.setattr(provider, 'authenticate', lambda user_id: True)
+    message = _message('m1', datetime(2024, 1, 1, tzinfo=timezone.utc))
+    message.sender = 'alice@example.com'
+    monkeypatch.setattr(provider, 'get_messages', lambda **kwargs: [message])
+
+    digest = server.get_message_digest()
+
+    assert digest[0]['fromName'] == 'Unknown'
+    assert digest[0]['fromAddress'] == 'alice@example.com'
+
+
+def test_get_message_digest_keeps_same_display_name_separate_across_providers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path, microsoft=True, gmail=True)
+    ms_provider = server.get_provider('microsoft')
+    gmail_provider = server.get_provider('gmail')
+    server.token_manager.store_token('ms-user', {'access_token': 'at'})
+    server.token_manager.store_token('gmail-user', {'token': 'gt', 'token_uri': 'https://oauth2.googleapis.com/token'})
+    monkeypatch.setattr(ms_provider, 'authenticate', lambda user_id: user_id == 'ms-user')
+    monkeypatch.setattr(gmail_provider, 'authenticate', lambda user_id: user_id == 'gmail-user')
+    ms_message = _message('m1', datetime(2024, 1, 1, tzinfo=timezone.utc))
+    ms_message.sender = 'Bob <bob@work.example.com>'
+    gmail_message = _message('g1', datetime(2024, 1, 1, tzinfo=timezone.utc), provider='gmail')
+    gmail_message.sender = 'Bob <bob@personal.example.com>'
+    monkeypatch.setattr(ms_provider, 'get_messages', lambda **kwargs: [ms_message])
+    monkeypatch.setattr(gmail_provider, 'get_messages', lambda **kwargs: [gmail_message])
+
+    digest = server.get_message_digest()
+
+    assert len(digest) == 2
+    assert {d['provider'] for d in digest} == {'microsoft', 'gmail'}
+
+
+def test_get_message_digest_sorts_by_count_descending_then_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    provider = server.get_provider('microsoft')
+    server.token_manager.store_token('user1', {'access_token': 'at'})
+    monkeypatch.setattr(provider, 'authenticate', lambda user_id: True)
+
+    def _senders(sender: str, count: int) -> List[EmailMessage]:
+        msgs = []
+        for i in range(count):
+            m = _message(f'{sender}-{i}', datetime(2024, 1, 1, tzinfo=timezone.utc))
+            m.sender = sender
+            msgs.append(m)
+        return msgs
+
+    messages = _senders('Zed <zed@example.com>', 3) + _senders('Amy <amy@example.com>', 1) + _senders('Bob <bob@example.com>', 3)
+    monkeypatch.setattr(provider, 'get_messages', lambda **kwargs: messages)
+
+    digest = server.get_message_digest()
+
+    assert [(d['fromName'], d['count']) for d in digest] == [('Bob', 3), ('Zed', 3), ('Amy', 1)]
+
+
+def test_get_message_digest_passes_through_folder_unread_only_and_max_messages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    provider = server.get_provider('microsoft')
+    server.token_manager.store_token('user1', {'access_token': 'at'})
+    monkeypatch.setattr(provider, 'authenticate', lambda user_id: True)
+    captured: Dict[str, Any] = {}
+    monkeypatch.setattr(provider, 'get_messages', lambda **kwargs: captured.update(kwargs) or [])
+
+    server.get_message_digest(folder='archive', unread_only=False, max_messages=50)
+
+    assert captured['folder'] == 'archive'
+    assert captured['unread_only'] is False
+    assert captured['max_messages'] == 50

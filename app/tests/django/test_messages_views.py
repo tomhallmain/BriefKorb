@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
@@ -19,7 +20,7 @@ from django.test import Client
 from django.urls import reverse
 
 from django_app.messages import views as messages_views_module
-from email_client.utils.sender_categorization import ImpactLevel
+from email_client.utils.sender_categorization import ImpactInference, ImpactLevel
 from email_server.config import EmailServerConfig, ExternalApiConfig, ExternalApiToken, ProviderConfig
 
 
@@ -292,20 +293,85 @@ def test_messages_view_context_sender_takes_precedence_over_selected_options(cli
 # --- messages_api_view (GET /api/messages, external bearer-token auth) -------
 #
 # Auth (require_external_api_token) has its own dedicated coverage in
-# test_authentication.py; the focus here is the view's own behavior once a
-# request is authorized -- query params, response shape, and status codes.
+# test_authentication.py. Multi-provider aggregation correctness (grouping,
+# provider tagging, per-provider failure handling, sorting) belongs to
+# UnifiedEmailServer.get_message_digest() and is covered in
+# test_unified_email_server.py, not here -- this view is just a thin caller
+# of it, so these tests patch `messages_views_module.UnifiedEmailServer`
+# wholesale and focus on the view's own job: config/auth gating, query
+# params, impact annotation, and status codes.
 
-def _write_external_api_config(token: str = 'good-token', enabled: bool = True) -> None:
+def _write_external_api_config(tmp_path: Path, token: str = 'good-token', enabled: bool = True, provider_enabled: bool = True) -> Path:
+    token_dir = tmp_path / 'tokens'
     config = EmailServerConfig(
-        microsoft=ProviderConfig(enabled=False),
+        microsoft=ProviderConfig(enabled=provider_enabled),
         gmail=ProviderConfig(enabled=False),
+        token_storage_path=str(token_dir),
         external_api=ExternalApiConfig(enabled=enabled, tokens=[ExternalApiToken(token=token, label='tagesform')]),
     )
     config.save(os.environ['BRIEFKORB_CONFIG_PATH'])
+    return token_dir
 
 
 def _auth_header(token: str = 'good-token') -> Dict[str, str]:
     return {'HTTP_AUTHORIZATION': f'Bearer {token}'}
+
+
+class FakeUnifiedEmailServer:
+    def __init__(
+        self,
+        authenticated_providers: Optional[List[Any]] = None,
+        digest: Optional[List[Dict[str, Any]]] = None,
+        raise_on_digest: Optional[Exception] = None,
+    ) -> None:
+        self._authenticated_providers = ['fake'] if authenticated_providers is None else authenticated_providers
+        self._digest = digest if digest is not None else []
+        self._raise_on_digest = raise_on_digest
+        self.get_message_digest_calls: List[Dict[str, Any]] = []
+
+    def get_authenticated_providers(self) -> List[Any]:
+        return self._authenticated_providers
+
+    def get_message_digest(self, folder: str = 'inbox', unread_only: bool = True, max_messages: int = 1000) -> List[Dict[str, Any]]:
+        self.get_message_digest_calls.append({'folder': folder, 'unread_only': unread_only, 'max_messages': max_messages})
+        if self._raise_on_digest:
+            raise self._raise_on_digest
+        return self._digest
+
+
+def _patch_unified_email_server(monkeypatch: pytest.MonkeyPatch, fake_server: FakeUnifiedEmailServer) -> None:
+    monkeypatch.setattr(messages_views_module, 'UnifiedEmailServer', lambda config: fake_server)
+
+
+@dataclass
+class FakeSenderCategorizationManager:
+    """Double for SenderCategorizationManager -- the real one is backed by
+    AppInfoCache, which touches the OS keyring (see test_app_info_cache.py).
+    messages_api_view constructs one directly (it can't go through a
+    Microsoft-gated MessagesService), so it must be patched out here too."""
+    impacts: Dict[str, str] = field(default_factory=dict)
+
+    def infer_for_sender(self, sender_email: str, subjects: List[str]) -> ImpactInference:
+        return ImpactInference(
+            impact=ImpactLevel(self.impacts.get(sender_email, ImpactLevel.UNCLASSIFIED.value)),
+            reason='fake', confidence=0.5,
+            generic_inference_score=0.1, blocklist_inference_score=0.2, bot_spam_inference_score=0.3,
+        )
+
+    def set_inferred_sender_impact(self, sender_email: str, inference: ImpactInference) -> None:
+        self.impacts[sender_email] = inference.impact.value
+
+    def get_sender_impact(self, sender_email: str) -> ImpactLevel:
+        return ImpactLevel(self.impacts.get(sender_email, ImpactLevel.UNCLASSIFIED.value))
+
+    def has_sender_exception(self, sender_email: str) -> bool:
+        return False
+
+
+def _patch_sender_categorization(monkeypatch: pytest.MonkeyPatch) -> FakeSenderCategorizationManager:
+    fake = FakeSenderCategorizationManager()
+    monkeypatch.setattr(messages_views_module, 'SenderCategorizationManager', lambda storage_path: fake)
+    return fake
 
 
 def test_messages_api_view_returns_401_when_unauthorized(client: Client) -> None:
@@ -315,15 +381,26 @@ def test_messages_api_view_returns_401_when_unauthorized(client: Client) -> None
     assert response.json() == {'error': 'Unauthorized'}
 
 
-def test_messages_api_view_returns_405_for_post(client: Client) -> None:
-    _write_external_api_config()
+def test_messages_api_view_returns_405_for_post(client: Client, tmp_path: Path) -> None:
+    _write_external_api_config(tmp_path)
     response = client.post(reverse('django_app.messages:messages_api'), **_auth_header())
 
     assert response.status_code == 405
 
 
-def test_messages_api_view_returns_503_when_no_mailbox_user_configured(client: Client) -> None:
-    _write_external_api_config()
+def test_messages_api_view_returns_401_when_config_missing_entirely(client: Client) -> None:
+    """With no config.yaml at all, require_external_api_token's own config
+    load (external_api defaults to disabled/empty when the file is absent)
+    already rejects the request with 401 before the view body -- and its
+    own config_path.exists() check -- ever runs, since both read the same
+    (env-var-resolved) config path."""
+    response = client.get(reverse('django_app.messages:messages_api'), **_auth_header())
+
+    assert response.status_code == 401
+
+
+def test_messages_api_view_returns_503_when_no_provider_configured(client: Client, tmp_path: Path) -> None:
+    _write_external_api_config(tmp_path, provider_enabled=False)
 
     response = client.get(reverse('django_app.messages:messages_api'), **_auth_header())
 
@@ -331,74 +408,75 @@ def test_messages_api_view_returns_503_when_no_mailbox_user_configured(client: C
     assert 'error' in response.json()
 
 
-def test_messages_api_view_returns_aggregated_messages_as_json(client: Client, monkeypatch: pytest.MonkeyPatch) -> None:
-    _write_external_api_config()
-    _authenticate_via_session(client)
-    fake = FakeMessagesService(message_data=[
-        {'fromName': 'Alice', 'fromAddress': 'a@example.com', 'impact': ImpactLevel.LOW_IMPACT.value},
+def test_messages_api_view_returns_503_when_no_mailbox_user_configured(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_external_api_config(tmp_path)
+    _patch_unified_email_server(monkeypatch, FakeUnifiedEmailServer(authenticated_providers=[]))
+
+    response = client.get(reverse('django_app.messages:messages_api'), **_auth_header())
+
+    assert response.status_code == 503
+    assert 'error' in response.json()
+
+
+def test_messages_api_view_returns_aggregated_messages_as_json(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_external_api_config(tmp_path)
+    _patch_sender_categorization(monkeypatch)
+    fake_server = FakeUnifiedEmailServer(digest=[
+        {'fromName': 'Alice', 'fromAddress': 'a@example.com', 'count': 1, 'lastReceivedDateTime': '2024-01-01T00:00:00Z', 'provider': 'microsoft'},
     ])
-    _patch_service(monkeypatch, fake)
+    _patch_unified_email_server(monkeypatch, fake_server)
 
     response = client.get(reverse('django_app.messages:messages_api'), **_auth_header())
 
     assert response.status_code == 200
-    assert response.json() == {'messages': [
-        {'fromName': 'Alice', 'fromAddress': 'a@example.com', 'impact': 'low-impact'},
-    ]}
+    messages = response.json()['messages']
+    assert len(messages) == 1
+    assert messages[0]['fromName'] == 'Alice'
+    assert messages[0]['provider'] == 'microsoft'
+    assert messages[0]['impact'] == 'unclassified'  # annotated by the (faked) SenderCategorizationManager
 
 
-def test_messages_api_view_unread_only_defaults_true(client: Client, monkeypatch: pytest.MonkeyPatch) -> None:
-    _write_external_api_config()
-    _authenticate_via_session(client)
-    fake = FakeMessagesService()
-    _patch_service(monkeypatch, fake)
+def test_messages_api_view_passes_query_params_to_digest(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_external_api_config(tmp_path)
+    _patch_sender_categorization(monkeypatch)
+    fake_server = FakeUnifiedEmailServer()
+    _patch_unified_email_server(monkeypatch, fake_server)
+
+    client.get(reverse('django_app.messages:messages_api') + '?mailbox=archive&unread_only=false', **_auth_header())
+
+    assert fake_server.get_message_digest_calls == [{'folder': 'archive', 'unread_only': False, 'max_messages': 1000}]
+
+
+def test_messages_api_view_unread_only_defaults_true(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_external_api_config(tmp_path)
+    _patch_sender_categorization(monkeypatch)
+    fake_server = FakeUnifiedEmailServer()
+    _patch_unified_email_server(monkeypatch, fake_server)
 
     client.get(reverse('django_app.messages:messages_api'), **_auth_header())
 
-    assert fake.get_messages_calls[0]['exclude_read'] is True
+    assert fake_server.get_message_digest_calls[0]['unread_only'] is True
 
 
-def test_messages_api_view_unread_only_false_disables_exclude_read(client: Client, monkeypatch: pytest.MonkeyPatch) -> None:
-    _write_external_api_config()
-    _authenticate_via_session(client)
-    fake = FakeMessagesService()
-    _patch_service(monkeypatch, fake)
-
-    client.get(reverse('django_app.messages:messages_api') + '?unread_only=false', **_auth_header())
-
-    assert fake.get_messages_calls[0]['exclude_read'] is False
-
-
-def test_messages_api_view_mailbox_param_is_passed_through(client: Client, monkeypatch: pytest.MonkeyPatch) -> None:
-    _write_external_api_config()
-    _authenticate_via_session(client)
-    fake = FakeMessagesService()
-    _patch_service(monkeypatch, fake)
-
-    client.get(reverse('django_app.messages:messages_api') + '?mailbox=archive', **_auth_header())
-
-    assert fake.get_messages_calls[0]['mailbox'] == 'archive'
-
-
-def test_messages_api_view_high_impact_only_filters_response(client: Client, monkeypatch: pytest.MonkeyPatch) -> None:
-    _write_external_api_config()
-    _authenticate_via_session(client)
-    fake = FakeMessagesService(message_data=[
-        {'fromAddress': 'a@example.com', 'impact': ImpactLevel.HIGH_IMPACT.value},
-        {'fromAddress': 'b@example.com', 'impact': ImpactLevel.LOW_IMPACT.value},
+def test_messages_api_view_high_impact_only_filters_response(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_external_api_config(tmp_path)
+    fake_categorization = _patch_sender_categorization(monkeypatch)
+    fake_categorization.impacts = {'a@example.com': ImpactLevel.HIGH_IMPACT.value, 'b@example.com': ImpactLevel.LOW_IMPACT.value}
+    fake_server = FakeUnifiedEmailServer(digest=[
+        {'fromName': 'A', 'fromAddress': 'a@example.com', 'count': 1, 'provider': 'microsoft'},
+        {'fromName': 'B', 'fromAddress': 'b@example.com', 'count': 1, 'provider': 'microsoft'},
     ])
-    _patch_service(monkeypatch, fake)
+    _patch_unified_email_server(monkeypatch, fake_server)
 
     response = client.get(reverse('django_app.messages:messages_api') + '?high_impact_only=true', **_auth_header())
 
     assert [m['fromAddress'] for m in response.json()['messages']] == ['a@example.com']
 
 
-def test_messages_api_view_returns_502_when_service_raises(client: Client, monkeypatch: pytest.MonkeyPatch) -> None:
-    _write_external_api_config()
-    _authenticate_via_session(client)
-    fake = FakeMessagesService(raise_on_get_messages=RuntimeError('graph api down'))
-    _patch_service(monkeypatch, fake)
+def test_messages_api_view_returns_502_when_digest_raises(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_external_api_config(tmp_path)
+    fake_server = FakeUnifiedEmailServer(raise_on_digest=RuntimeError('graph api down'))
+    _patch_unified_email_server(monkeypatch, fake_server)
 
     response = client.get(reverse('django_app.messages:messages_api'), **_auth_header())
 
