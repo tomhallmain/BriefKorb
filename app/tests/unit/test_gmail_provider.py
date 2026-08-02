@@ -313,6 +313,42 @@ def test_get_messages_unread_only_adds_query_filter(tmp_path: Path) -> None:
     assert resource.list_calls[0]['q'] == 'in:inbox is:unread'
 
 
+def test_get_messages_defaults_to_inbox_folder(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    resource = FakeMessagesResource(list_results={'messages': []}, get_results={})
+    provider._service = FakeGmailService(resource)
+
+    provider.get_messages('user1')
+
+    assert resource.list_calls[0]['q'] == 'in:inbox'
+
+
+def test_get_messages_queries_the_requested_folder(tmp_path: Path) -> None:
+    """Regression test: get_messages() used to hardcode 'in:inbox'
+    regardless of the folder argument, silently ignoring it."""
+    provider = _provider(tmp_path)
+    resource = FakeMessagesResource(list_results={'messages': []}, get_results={})
+    provider._service = FakeGmailService(resource)
+
+    provider.get_messages('user1', folder='sent')
+
+    assert resource.list_calls[0]['q'] == 'in:sent'
+
+
+def test_get_messages_queries_requested_folder_with_unread_filter(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    resource = FakeMessagesResource(list_results={'messages': []}, get_results={})
+    provider._service = FakeGmailService(resource)
+
+    provider.get_messages('user1', folder='sent', unread_only=True)
+
+    assert resource.list_calls[0]['q'] == 'in:sent is:unread'
+
+
+def test_sent_folder_class_attribute() -> None:
+    assert GmailProvider.SENT_FOLDER == 'sent'
+
+
 def test_get_messages_returns_empty_list_on_api_exception(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
     provider._service = _ExplodingService()

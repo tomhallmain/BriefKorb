@@ -20,7 +20,7 @@ EntityGraphManager itself works.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -330,6 +330,57 @@ def test_get_user_messages_skips_provider_that_raises_and_continues(tmp_path: Pa
 def test_get_user_messages_returns_empty_list_for_empty_provider_list(tmp_path: Path) -> None:
     server = _server(tmp_path)
     assert server.get_user_messages(providers=[]) == []
+
+
+# --- get_sent_messages -----------------------------------------------------
+
+def test_get_sent_messages_uses_provider_specific_sent_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    provider = server.get_provider('microsoft')
+    server.token_manager.store_token('user1', {'access_token': 'at'})
+    monkeypatch.setattr(provider, 'authenticate', lambda user_id: True)
+    captured: Dict[str, Any] = {}
+    monkeypatch.setattr(provider, 'get_messages', lambda **kwargs: captured.update(kwargs) or [])
+
+    server.get_sent_messages()
+
+    assert captured['folder'] == 'sentitems'
+    assert captured['unread_only'] is False
+
+
+def test_get_sent_messages_merges_multiple_providers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path, microsoft=True, gmail=True)
+    ms_provider = server.get_provider('microsoft')
+    gmail_provider = server.get_provider('gmail')
+    server.token_manager.store_token('ms-user', {'access_token': 'at'})
+    server.token_manager.store_token('gmail-user', {'token': 'gt', 'token_uri': 'https://oauth2.googleapis.com/token'})
+    monkeypatch.setattr(ms_provider, 'authenticate', lambda user_id: user_id == 'ms-user')
+    monkeypatch.setattr(gmail_provider, 'authenticate', lambda user_id: user_id == 'gmail-user')
+    monkeypatch.setattr(ms_provider, 'get_messages', lambda **kwargs: [_message('ms1', datetime(2024, 1, 1, tzinfo=timezone.utc))])
+    monkeypatch.setattr(gmail_provider, 'get_messages', lambda **kwargs: [_message('g1', datetime(2024, 1, 1, tzinfo=timezone.utc), provider='gmail')])
+
+    result = server.get_sent_messages()
+
+    assert {m.id for m in result} == {'ms1', 'g1'}
+
+
+def test_get_sent_messages_skips_provider_that_raises_and_continues(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    provider = server.get_provider('microsoft')
+    server.token_manager.store_token('user1', {'access_token': 'at'})
+    monkeypatch.setattr(provider, 'authenticate', lambda user_id: True)
+
+    def raise_error(**kwargs: Any) -> Any:
+        raise RuntimeError('graph api down')
+
+    monkeypatch.setattr(provider, 'get_messages', raise_error)
+
+    assert server.get_sent_messages() == []
+
+
+def test_get_sent_messages_returns_empty_list_when_no_authenticated_providers(tmp_path: Path) -> None:
+    server = _server(tmp_path)
+    assert server.get_sent_messages() == []
 
 
 def test_get_user_messages_excludes_blocked_senders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -689,6 +740,198 @@ def test_get_message_digest_bucket_carries_per_message_summaries(tmp_path: Path)
     assert m1_summary['isRead'] is False
     assert m1_summary['subject'] == 'S'
     assert m1_summary['lastReceivedDateTime'] == m1.received_date.isoformat()
+
+
+# --- get_message_digest: subject_keyword / sender_search --------------------
+
+def test_get_message_digest_subject_keyword_filters_before_aggregation(tmp_path: Path) -> None:
+    server = _server(tmp_path)
+    matching = _message('m1', datetime(2024, 1, 1, tzinfo=timezone.utc))
+    matching.subject = 'Invoice attached'
+    matching.sender = 'a@example.com'
+    non_matching = _message('m2', datetime(2024, 1, 2, tzinfo=timezone.utc))
+    non_matching.subject = 'Hello there'
+    non_matching.sender = 'b@example.com'
+
+    digest = server.get_message_digest(messages=[matching, non_matching], subject_keyword='invoice')
+
+    assert len(digest) == 1
+    assert digest[0]['fromAddress'] == 'a@example.com'
+    assert digest[0]['count'] == 1
+
+
+def test_get_message_digest_subject_keyword_drops_sender_with_no_matches(tmp_path: Path) -> None:
+    server = _server(tmp_path)
+    message = _message('m1', datetime(2024, 1, 1, tzinfo=timezone.utc))
+    message.subject = 'Hello there'
+
+    digest = server.get_message_digest(messages=[message], subject_keyword='invoice')
+
+    assert digest == []
+
+
+def test_get_message_digest_sender_search_matches_name_or_address(tmp_path: Path) -> None:
+    server = _server(tmp_path)
+    alice = _message('m1', datetime(2024, 1, 1, tzinfo=timezone.utc))
+    alice.sender = 'Alice Smith <alice@example.com>'
+    bob = _message('m2', datetime(2024, 1, 2, tzinfo=timezone.utc))
+    bob.sender = 'Bob Jones <bob@example.com>'
+
+    digest = server.get_message_digest(messages=[alice, bob], sender_search='alice')
+
+    assert len(digest) == 1
+    assert digest[0]['fromName'] == 'Alice Smith'
+
+
+def test_get_message_digest_sender_search_matches_address_when_name_differs(tmp_path: Path) -> None:
+    server = _server(tmp_path)
+    message = _message('m1', datetime(2024, 1, 1, tzinfo=timezone.utc))
+    message.sender = 'Newsletter <updates@example.com>'
+
+    digest = server.get_message_digest(messages=[message], sender_search='updates@')
+
+    assert len(digest) == 1
+
+
+def test_get_message_digest_sender_search_is_case_insensitive(tmp_path: Path) -> None:
+    server = _server(tmp_path)
+    message = _message('m1', datetime(2024, 1, 1, tzinfo=timezone.utc))
+    message.sender = 'Alice Smith <alice@example.com>'
+
+    digest = server.get_message_digest(messages=[message], sender_search='ALICE')
+
+    assert len(digest) == 1
+
+
+def test_get_message_digest_sender_search_excludes_non_matching_senders(tmp_path: Path) -> None:
+    server = _server(tmp_path)
+    message = _message('m1', datetime(2024, 1, 1, tzinfo=timezone.utc))
+    message.sender = 'Alice Smith <alice@example.com>'
+
+    digest = server.get_message_digest(messages=[message], sender_search='nobody')
+
+    assert digest == []
+
+
+# --- get_message_digest: response status ------------------------------------
+
+def _sent_message(msg_id: str, received_date: datetime, to: str, provider: str = 'microsoft') -> EmailMessage:
+    m = _message(msg_id, received_date, provider=provider)
+    m.recipients = [to]
+    return m
+
+
+def test_get_message_digest_awaiting_your_reply_when_no_sent_message_and_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    old_received = datetime.now(timezone.utc) - timedelta(days=10)
+    message = _message('m1', old_received)
+    message.sender = 'alice@example.com'
+    monkeypatch.setattr(server, 'get_sent_messages', lambda **kwargs: [])
+
+    digest = server.get_message_digest(messages=[message], include_response_status=True)
+
+    assert digest[0]['awaitingYourReply'] is True
+    assert digest[0]['awaitingTheirReply'] is False
+    assert digest[0]['lastSentToSender'] is None
+
+
+def test_get_message_digest_awaiting_their_reply_when_sent_after_last_received_and_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    old_received = datetime.now(timezone.utc) - timedelta(days=10)
+    old_sent = datetime.now(timezone.utc) - timedelta(days=5)
+    message = _message('m1', old_received)
+    message.sender = 'alice@example.com'
+    sent = _sent_message('s1', old_sent, to='alice@example.com')
+    monkeypatch.setattr(server, 'get_sent_messages', lambda **kwargs: [sent])
+
+    digest = server.get_message_digest(messages=[message], include_response_status=True)
+
+    assert digest[0]['awaitingYourReply'] is False
+    assert digest[0]['awaitingTheirReply'] is True
+    assert digest[0]['lastSentToSender'] == old_sent.isoformat()
+
+
+def test_get_message_digest_not_stale_within_threshold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    recent_received = datetime.now(timezone.utc) - timedelta(hours=1)
+    message = _message('m1', recent_received)
+    message.sender = 'alice@example.com'
+    monkeypatch.setattr(server, 'get_sent_messages', lambda **kwargs: [])
+
+    digest = server.get_message_digest(messages=[message], include_response_status=True)
+
+    assert digest[0]['awaitingYourReply'] is False
+    assert digest[0]['awaitingTheirReply'] is False
+
+
+def test_get_message_digest_response_status_respects_stale_after_days(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    received = datetime.now(timezone.utc) - timedelta(days=2)
+    message = _message('m1', received)
+    message.sender = 'alice@example.com'
+    monkeypatch.setattr(server, 'get_sent_messages', lambda **kwargs: [])
+
+    not_yet_stale = server.get_message_digest(messages=[message], include_response_status=True, stale_after_days=5.0)
+    already_stale = server.get_message_digest(messages=[message], include_response_status=True, stale_after_days=1.0)
+
+    assert not_yet_stale[0]['awaitingYourReply'] is False
+    assert already_stale[0]['awaitingYourReply'] is True
+
+
+def test_get_message_digest_no_response_status_fields_when_not_requested(tmp_path: Path) -> None:
+    server = _server(tmp_path)
+    message = _message('m1', datetime(2024, 1, 1, tzinfo=timezone.utc))
+
+    digest = server.get_message_digest(messages=[message])
+
+    assert 'awaitingYourReply' not in digest[0]
+    assert 'lastSentToSender' not in digest[0]
+
+
+def test_get_message_digest_awaiting_your_reply_only_filters_and_implies_computation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    stale = _message('m1', datetime.now(timezone.utc) - timedelta(days=10))
+    stale.sender = 'stale@example.com'
+    fresh = _message('m2', datetime.now(timezone.utc) - timedelta(hours=1))
+    fresh.sender = 'fresh@example.com'
+    monkeypatch.setattr(server, 'get_sent_messages', lambda **kwargs: [])
+
+    # include_response_status not explicitly set -- the _only flag alone
+    # must still trigger computation.
+    digest = server.get_message_digest(messages=[stale, fresh], awaiting_your_reply_only=True)
+
+    assert [d['fromAddress'] for d in digest] == ['stale@example.com']
+
+
+def test_get_message_digest_awaiting_their_reply_only_filters(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    message = _message('m1', datetime.now(timezone.utc) - timedelta(days=10))
+    message.sender = 'alice@example.com'
+    old_sent = _sent_message('s1', datetime.now(timezone.utc) - timedelta(days=5), to='alice@example.com')
+    monkeypatch.setattr(server, 'get_sent_messages', lambda **kwargs: [old_sent])
+
+    awaiting_their_reply = server.get_message_digest(messages=[message], awaiting_their_reply_only=True)
+    awaiting_your_reply = server.get_message_digest(messages=[message], awaiting_your_reply_only=True)
+
+    assert len(awaiting_their_reply) == 1
+    assert awaiting_your_reply == []
+
+
+def test_get_message_digest_response_status_normalizes_gmail_style_recipients(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gmail's EmailMessage.recipients holds raw 'Name <addr>' header
+    strings, unlike Microsoft's bare addresses -- the response-status
+    lookup must normalize both the same way sender parsing already does."""
+    server = _server(tmp_path)
+    old_received = datetime.now(timezone.utc) - timedelta(days=10)
+    old_sent = datetime.now(timezone.utc) - timedelta(days=5)
+    message = _message('m1', old_received, provider='gmail')
+    message.sender = 'alice@example.com'
+    sent = _sent_message('s1', old_sent, to='Alice Smith <alice@example.com>', provider='gmail')
+    monkeypatch.setattr(server, 'get_sent_messages', lambda **kwargs: [sent])
+
+    digest = server.get_message_digest(messages=[message], include_response_status=True)
+
+    assert digest[0]['awaitingTheirReply'] is True
 
 
 # --- get_message --------------------------------------------------------------

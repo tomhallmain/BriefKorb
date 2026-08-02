@@ -18,7 +18,12 @@ logger = setup_logger('email_server.providers.microsoft')
 
 class MicrosoftGraphProvider(EmailProvider):
     """Microsoft Graph API email provider implementation"""
-    
+
+    # Graph's well-known folder name for sent mail -- distinct from
+    # Gmail's search-operator name ('sent'), since folder naming isn't
+    # unified across providers the way "inbox" happens to be.
+    SENT_FOLDER = 'sentitems'
+
     def __init__(self, client_id: str, client_secret: str, tenant_id: str, redirect_uri: str, scopes: Optional[List[str]] = None, token_manager: Optional[TokenManager] = None):
         self.client_id = client_id
         self.client_secret = client_secret

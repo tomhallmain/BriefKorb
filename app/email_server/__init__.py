@@ -8,7 +8,7 @@ This module provides a unified interface for interacting with different email pr
 from abc import ABC, abstractmethod
 from email.utils import parseaddr
 from typing import Any, List, Dict, Optional, Set, Union, TYPE_CHECKING
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from .config import EmailServerConfig, create_default_config
 from .utils.logger import setup_logger
@@ -384,12 +384,49 @@ class UnifiedEmailServer:
 
         return sorted(messages, key=lambda x: x.received_date, reverse=True)
 
+    def get_sent_messages(self, max_messages: int = 1000) -> List[EmailMessage]:
+        """Fetch every authenticated provider's sent-mail folder.
+
+        Unlike get_user_messages(), this can't just take a single `folder`
+        string for every provider -- "sent" isn't spelled the same way
+        across providers (Microsoft's Graph well-known folder name is
+        'sentitems', Gmail's search-operator name is 'sent'), so each
+        provider resolves its own via its SENT_FOLDER class attribute.
+        Used by get_message_digest()'s response-status tracking (has the
+        user replied to a given sender yet?).
+        """
+        messages: List[EmailMessage] = []
+        for auth_prov in self.get_authenticated_providers():
+            try:
+                sent_folder = getattr(auth_prov.provider, 'SENT_FOLDER', 'sent')
+                provider_messages = auth_prov.provider.get_messages(
+                    user_id=auth_prov.user_id,
+                    folder=sent_folder,
+                    max_messages=max_messages,
+                    unread_only=False,
+                )
+                messages.extend(provider_messages)
+                logger.info(f"Retrieved {len(provider_messages)} sent messages from {auth_prov.provider_name} for user {auth_prov.user_id}")
+            except Exception as e:
+                logger.error(f"Failed to get sent messages from {auth_prov.provider_name} for user {auth_prov.user_id}: {e}")
+
+        for m in messages:
+            m.received_date = normalize_received_at_utc(m.received_date)
+
+        return messages
+
     def get_message_digest(
         self,
         folder: str = 'inbox',
         unread_only: bool = True,
         max_messages: int = 1000,
         messages: Optional[List[EmailMessage]] = None,
+        sender_search: Optional[str] = None,
+        subject_keyword: Optional[str] = None,
+        include_response_status: bool = False,
+        stale_after_days: float = 3.0,
+        awaiting_your_reply_only: bool = False,
+        awaiting_their_reply_only: bool = False,
     ) -> List[Dict[str, Any]]:
         """Aggregate messages from every authenticated provider into one row
         per sender, tagged with the source provider.
@@ -406,6 +443,29 @@ class UnifiedEmailServer:
         message-reading view, entity extraction) and shouldn't pay for two
         live fetches in one request.
 
+        `subject_keyword` filters the raw message list (case-insensitive
+        substring match on subject) *before* aggregation, so counts and the
+        representative subject/timestamp naturally reflect only matching
+        messages, and a sender with zero matches simply produces no bucket.
+        `sender_search` filters the resulting buckets (case-insensitive
+        substring match on fromName or fromAddress) after aggregation, since
+        it's filtering sender identity rather than message content.
+
+        `include_response_status` (or either `_only` flag below, which
+        implies it) additionally fetches every provider's Sent folder via
+        get_sent_messages() and, per bucket, adds:
+        - `lastSentToSender`: ISO timestamp of the most recent message sent
+          to that sender's address, or null if none.
+        - `awaitingYourReply`: true if the sender's last message is newer
+          than anything sent back to them (or nothing has been sent to them
+          at all) and is older than `stale_after_days`.
+        - `awaitingTheirReply`: true if the last message sent to them is
+          newer than anything received from them (or nothing has been
+          received from them at all) and is older than `stale_after_days`.
+        Setting `awaiting_your_reply_only`/`awaiting_their_reply_only` drops
+        buckets that don't match, rather than just annotating them -- for a
+        caller that only wants a stale-conversations view.
+
         Deliberately does not apply sender-impact/spam categorization --
         that lives in SenderCategorizationManager (email_client.utils.
         sender_categorization), a layer above this one. Callers that want it
@@ -414,6 +474,10 @@ class UnifiedEmailServer:
         """
         if messages is None:
             messages = self.get_user_messages(folder=folder, unread_only=unread_only, max_messages=max_messages)
+
+        if subject_keyword:
+            keyword_lower = subject_keyword.lower()
+            messages = [m for m in messages if keyword_lower in (m.subject or '').lower()]
 
         buckets: Dict[tuple, Dict[str, Any]] = {}
         for message in messages:
@@ -446,11 +510,75 @@ class UnifiedEmailServer:
                     'messages': [message_summary],
                 }
 
+        result = list(buckets.values())
+
+        if sender_search:
+            search_lower = sender_search.lower()
+            result = [
+                b for b in result
+                if search_lower in b['fromName'].lower() or search_lower in b['fromAddress'].lower()
+            ]
+
+        if include_response_status or awaiting_your_reply_only or awaiting_their_reply_only:
+            result = self._annotate_response_status(result, stale_after_days)
+            if awaiting_your_reply_only:
+                result = [b for b in result if b['awaitingYourReply']]
+            if awaiting_their_reply_only:
+                result = [b for b in result if b['awaitingTheirReply']]
+
         return sorted(
-            sorted(buckets.values(), key=lambda m: m['fromName']),
+            sorted(result, key=lambda m: m['fromName']),
             key=lambda m: m['count'],
             reverse=True,
         )
+
+    def _annotate_response_status(self, buckets: List[Dict[str, Any]], stale_after_days: float) -> List[Dict[str, Any]]:
+        """Add lastSentToSender/awaitingYourReply/awaitingTheirReply to each
+        bucket (see get_message_digest's docstring). Correlates by
+        (provider, recipient address) rather than conversation/thread ID --
+        neither provider captures a thread ID on EmailMessage today, and
+        since this whole app aggregates by sender already, address
+        correlation is both sufficient and consistent with that design.
+        """
+        last_sent_to: Dict[tuple, datetime] = {}
+        for message in self.get_sent_messages():
+            for recipient in (message.recipients or []):
+                # EmailMessage.recipients isn't consistently shaped across
+                # providers either (Microsoft: bare addresses; Gmail: raw
+                # "Name <addr>" header strings) -- same parseaddr treatment
+                # as the sender field above.
+                _, address = parseaddr(recipient or '')
+                address = address.strip().lower()
+                if not address:
+                    continue
+                key = (message.provider, address)
+                if key not in last_sent_to or message.received_date > last_sent_to[key]:
+                    last_sent_to[key] = message.received_date
+
+        now = datetime.now(timezone.utc)
+        stale_threshold = timedelta(days=stale_after_days)
+
+        for bucket in buckets:
+            last_sent = last_sent_to.get((bucket['provider'], bucket['fromAddress'].strip().lower()))
+            last_received_str = bucket['lastReceivedDateTime']
+            last_received = datetime.fromisoformat(last_received_str) if last_received_str else None
+
+            awaiting_your_reply = (
+                last_received is not None
+                and (last_sent is None or last_received > last_sent)
+                and (now - last_received) > stale_threshold
+            )
+            awaiting_their_reply = (
+                last_sent is not None
+                and (last_received is None or last_sent > last_received)
+                and (now - last_sent) > stale_threshold
+            )
+
+            bucket['lastSentToSender'] = last_sent.isoformat() if last_sent else None
+            bucket['awaitingYourReply'] = awaiting_your_reply
+            bucket['awaitingTheirReply'] = awaiting_their_reply
+
+        return buckets
 
     def get_message(self, user_id: str, provider_name: str, message_id: str) -> Optional[EmailMessage]:
         """Get a single message (including body) for a user via the named provider."""

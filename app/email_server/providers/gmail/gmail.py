@@ -20,7 +20,12 @@ logger = setup_logger('email_server.providers.gmail')
 
 class GmailProvider(EmailProvider):
     """Gmail API provider implementation"""
-    
+
+    # Gmail's search-operator name for the sent-mail folder -- distinct from
+    # Microsoft's Graph well-known folder name ('sentitems'), since folder
+    # naming isn't unified across providers the way "inbox" happens to be.
+    SENT_FOLDER = 'sent'
+
     def __init__(self, credentials_path: str, redirect_uri: str, token_manager: Optional[TokenManager] = None):
         self.credentials_path = credentials_path
         self.redirect_uri = redirect_uri
@@ -162,7 +167,7 @@ class GmailProvider(EmailProvider):
                 logger.error(f"Failed to authenticate user {user_id} for message retrieval")
                 return []
 
-        query = 'in:inbox'
+        query = f'in:{folder}'
         if unread_only:
             query += ' is:unread'
 

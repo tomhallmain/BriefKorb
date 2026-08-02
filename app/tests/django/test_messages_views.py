@@ -465,7 +465,43 @@ def test_messages_api_view_passes_query_params_to_digest(client: Client, tmp_pat
 
     client.get(reverse('django_app.messages:messages_api') + '?mailbox=archive&unread_only=false', **_auth_header())
 
-    assert fake_server.get_message_digest_calls == [{'messages': None, 'folder': 'archive', 'unread_only': False, 'max_messages': 1000}]
+    assert fake_server.get_message_digest_calls == [{
+        'messages': None, 'folder': 'archive', 'unread_only': False, 'max_messages': 1000,
+        'sender_search': None, 'subject_keyword': None,
+        'include_response_status': False, 'stale_after_days': 3.0,
+        'awaiting_your_reply_only': False, 'awaiting_their_reply_only': False,
+    }]
+
+
+def test_messages_api_view_passes_new_filter_params_to_digest(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_external_api_config(tmp_path)
+    _patch_sender_categorization(monkeypatch)
+    fake_server = FakeUnifiedEmailServer(authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')])
+    _patch_server(monkeypatch, fake_server)
+
+    client.get(
+        reverse('django_app.messages:messages_api')
+        + '?senderSearch=alice&subjectKeyword=invoice&staleAfterDays=5&awaitingYourReply=true&awaitingTheirReply=true',
+        **_auth_header(),
+    )
+
+    call = fake_server.get_message_digest_calls[0]
+    assert call['sender_search'] == 'alice'
+    assert call['subject_keyword'] == 'invoice'
+    assert call['stale_after_days'] == 5.0
+    assert call['awaiting_your_reply_only'] is True
+    assert call['awaiting_their_reply_only'] is True
+
+
+def test_messages_api_view_include_response_status_param(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_external_api_config(tmp_path)
+    _patch_sender_categorization(monkeypatch)
+    fake_server = FakeUnifiedEmailServer(authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')])
+    _patch_server(monkeypatch, fake_server)
+
+    client.get(reverse('django_app.messages:messages_api') + '?includeResponseStatus=true', **_auth_header())
+
+    assert fake_server.get_message_digest_calls[0]['include_response_status'] is True
 
 
 def test_messages_api_view_unread_only_defaults_true(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -231,6 +231,16 @@ def _parse_bool_param(request, name: str, default: bool) -> bool:
     return raw.strip().lower() in ('1', 'true', 'yes', 'on')
 
 
+def _parse_float_param(request, name: str, default: float) -> float:
+    raw = request.GET.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 def _load_config() -> Tuple[Optional[EmailServerConfig], Optional[str]]:
     """Resolve and load config.yaml, or return (None, <error message>) if
     it doesn't exist yet. Shared by every view in this module that needs
@@ -280,7 +290,27 @@ def messages_api_view(request):
 
     Cost note for callers: each call is one or more live Graph/Gmail API
     fetches against BriefKorb's own token quota, not a cheap local/cached
-    query. Poll infrequently -- on the order of hours, not per-page-load."""
+    query. Poll infrequently -- on the order of hours, not per-page-load.
+    Requesting `awaitingYourReply`/`awaitingTheirReply` (or passing
+    `includeResponseStatus`) adds a second live fetch of every provider's
+    Sent folder -- roughly doubles the cost of the call, so only ask for
+    it when the signal is actually needed.
+
+    Optional query params beyond `mailbox`/`unread_only`/`high_impact_only`:
+    - `senderSearch`: case-insensitive substring match against a sender's
+      display name or address.
+    - `subjectKeyword`: case-insensitive substring match against message
+      subjects; a sender with no matching messages is dropped entirely
+      rather than shown with an empty/irrelevant bucket.
+    - `includeResponseStatus`: annotate every bucket with
+      `lastSentToSender`/`awaitingYourReply`/`awaitingTheirReply` (see
+      UnifiedEmailServer.get_message_digest) without filtering by them.
+    - `awaitingYourReply` / `awaitingTheirReply`: filter to only buckets
+      matching that response-status signal (implies response-status is
+      computed even without `includeResponseStatus`).
+    - `staleAfterDays`: threshold (in days) for the above two signals,
+      default 3.0.
+    """
     config, error = _load_config()
     if error:
         return JsonResponse({'error': error}, status=503)
@@ -292,9 +322,22 @@ def messages_api_view(request):
     mailbox = request.GET.get('mailbox', 'inbox')
     unread_only = _parse_bool_param(request, 'unread_only', default=True)
     high_impact_only = _parse_bool_param(request, 'high_impact_only', default=False)
+    sender_search = request.GET.get('senderSearch') or None
+    subject_keyword = request.GET.get('subjectKeyword') or None
+    include_response_status = _parse_bool_param(request, 'includeResponseStatus', default=False)
+    awaiting_your_reply_only = _parse_bool_param(request, 'awaitingYourReply', default=False)
+    awaiting_their_reply_only = _parse_bool_param(request, 'awaitingTheirReply', default=False)
+    stale_after_days = _parse_float_param(request, 'staleAfterDays', default=3.0)
 
     try:
-        message_data = server.get_message_digest(folder=mailbox, unread_only=unread_only, max_messages=1000)
+        message_data = server.get_message_digest(
+            folder=mailbox, unread_only=unread_only, max_messages=1000,
+            sender_search=sender_search, subject_keyword=subject_keyword,
+            include_response_status=include_response_status,
+            stale_after_days=stale_after_days,
+            awaiting_your_reply_only=awaiting_your_reply_only,
+            awaiting_their_reply_only=awaiting_their_reply_only,
+        )
         sender_categorization = SenderCategorizationManager(config.token_storage_path)
         message_data = annotate_sender_impact(message_data, sender_categorization)
     except Exception as e:

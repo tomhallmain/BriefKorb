@@ -28,6 +28,10 @@ def _provider(tmp_path: Path) -> MicrosoftGraphProvider:
     )
 
 
+def test_sent_folder_class_attribute() -> None:
+    assert MicrosoftGraphProvider.SENT_FOLDER == 'sentitems'
+
+
 class _FakeResponse:
     def __init__(self, status_code: int = 200, json_data: Optional[Dict[str, Any]] = None, text: str = '') -> None:
         self.status_code = status_code
