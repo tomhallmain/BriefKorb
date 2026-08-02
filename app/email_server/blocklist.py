@@ -35,6 +35,10 @@ class SenderBlocklist:
         self._blocked.add(email.lower())
         self._save()
 
+    def unblock(self, email: str) -> None:
+        self._blocked.discard(email.lower())
+        self._save()
+
     def is_blocked(self, email: str) -> bool:
         return email.lower() in self._blocked
 

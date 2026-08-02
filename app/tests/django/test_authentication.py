@@ -1,6 +1,8 @@
 """Tests for django_app/authentication.py: the external-facing (non-session)
-bearer-token auth used by messages_api_view (see
-docs/external-message-api-spec.md).
+bearer-token auth used by messages_api_view. Checks a request's bearer
+token against the `external_api.tokens` registry in config.yaml -- any
+valid token authorizes the request, independent of Django session/cookie
+auth, since callers are external background jobs with no browser.
 
 _load_external_api_config() resolves config.yaml via
 EmailServerConfig.resolve_path(), which honors BRIEFKORB_CONFIG_PATH ahead

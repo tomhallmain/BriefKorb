@@ -36,6 +36,7 @@ class FakeUnifiedEmailServer:
         mark_as_read_result: bool = True,
         delete_result: bool = True,
         block_result: bool = True,
+        blocked_sender_summary: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         self._authenticated_providers = authenticated_providers if authenticated_providers is not None else []
         self._messages = messages if messages is not None else []
@@ -47,6 +48,7 @@ class FakeUnifiedEmailServer:
         self._mark_as_read_result = mark_as_read_result
         self._delete_result = delete_result
         self._block_result = block_result
+        self._blocked_sender_summary = blocked_sender_summary if blocked_sender_summary is not None else []
 
         self.get_user_messages_calls: List[Dict[str, Any]] = []
         self.get_message_digest_calls: List[Dict[str, Any]] = []
@@ -55,6 +57,7 @@ class FakeUnifiedEmailServer:
         self.mark_messages_as_read_calls: List[Dict[str, Any]] = []
         self.delete_user_messages_calls: List[Dict[str, Any]] = []
         self.block_senders_calls: List[Dict[str, Any]] = []
+        self.unblock_sender_calls: List[str] = []
 
     def get_authenticated_providers(self, provider_name: Optional[str] = None) -> List[FakeAuthenticatedProvider]:
         if provider_name is None:
@@ -89,9 +92,31 @@ class FakeUnifiedEmailServer:
         self.delete_user_messages_calls.append({'user_id': user_id, 'provider_name': provider_name, 'message_ids': message_ids})
         return self._delete_result
 
-    def block_senders(self, user_id: str, provider_name: str, sender_names: List[str], source: str = 'api') -> bool:
-        self.block_senders_calls.append({'user_id': user_id, 'provider_name': provider_name, 'sender_names': sender_names, 'source': source})
+    def block_senders(
+        self,
+        user_id: str,
+        provider_name: str,
+        sender_names: List[str],
+        source: str = 'api',
+        sender_details: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> bool:
+        self.block_senders_calls.append({
+            'user_id': user_id, 'provider_name': provider_name, 'sender_names': sender_names,
+            'source': source, 'sender_details': sender_details,
+        })
         return self._block_result
+
+    def get_blocked_sender_summary(self, sender: Optional[str] = None) -> List[Dict[str, Any]]:
+        if sender is None:
+            return self._blocked_sender_summary
+        return [s for s in self._blocked_sender_summary if s['sender'] == sender]
+
+    def unblock_sender(self, email: str) -> None:
+        self.unblock_sender_calls.append(email)
+        self._blocked_sender_summary = [
+            {**s, 'is_locally_blocked': False} if s['sender'] == email.lower() else s
+            for s in self._blocked_sender_summary
+        ]
 
 
 def patch_server(monkeypatch: pytest.MonkeyPatch, fake_server: FakeUnifiedEmailServer) -> None:

@@ -2,7 +2,7 @@
 Gmail API provider implementation
 """
 
-from typing import List, Optional, Union, Dict
+from typing import Any, List, Optional, Union, Dict
 from datetime import datetime, timezone
 import base64
 from email.mime.text import MIMEText
@@ -285,7 +285,13 @@ class GmailProvider(EmailProvider):
             logger.error(f"Failed to delete messages for user {user_id}: {str(e)}")
             return False
 
-    def block_senders(self, user_id: str, sender_names: List[str], source: str = 'api') -> bool:
+    def block_senders(
+        self,
+        user_id: str,
+        sender_names: List[str],
+        source: str = 'api',
+        sender_details: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> bool:
         """Gmail has no equivalent to Microsoft Graph's inbox-rule
         mechanism in this codebase -- there is no server-side way here to
         auto-delete a sender's future mail via the Gmail API. Always

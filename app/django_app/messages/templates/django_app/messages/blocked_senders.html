@@ -1,0 +1,101 @@
+{% extends "django_app/base.html" %}
+{% block content %}
+<div class="container mt-4">
+    <h1>Blocked Senders</h1>
+    <p><a href="{% url 'django_app.messages:messages' %}">&larr; Back to Messages</a></p>
+
+    {% if messages %}
+        {% for message in messages %}
+            <div class="alert alert-{{ message.tags }} alert-dismissible fade show" role="alert">
+                {{ message }}
+            </div>
+        {% endfor %}
+    {% endif %}
+
+    {% if error %}
+        <div class="alert alert-danger" role="alert">{{ error }}</div>
+    {% endif %}
+
+    <p class="text-muted">
+        Block-event history, not live provider-side enforcement state. A
+        "Locally blocked" sender is suppressed from display in both
+        clients; a history-only sender (e.g. a web-side Microsoft rule
+        block, keyed by display name) has no local suppression to unblock
+        here.
+    </p>
+
+    <table class="table sortable">
+        <thead>
+            <tr>
+                <th scope="col">Sender</th>
+                <th scope="col">Display Name</th>
+                <th scope="col">Block Events</th>
+                <th scope="col">Last Blocked</th>
+                <th scope="col">Locally Blocked?</th>
+                <th scope="col"></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for summary in summaries %}
+                <tr>
+                    <td>{{ summary.sender }}</td>
+                    <td>{{ summary.sender_display_name|default:"—" }}</td>
+                    <td>{{ summary.event_count }}</td>
+                    <td>{{ summary.latest_event.timestamp_utc }}</td>
+                    <td>
+                        <span class="badge {% if summary.is_locally_blocked %}badge-danger{% else %}badge-secondary{% endif %}">
+                            {% if summary.is_locally_blocked %}Yes{% else %}No{% endif %}
+                        </span>
+                    </td>
+                    <td><a href="?sender={{ summary.sender|urlencode }}">Details</a></td>
+                </tr>
+            {% empty %}
+                <tr>
+                    <td colspan="6" class="text-center text-muted">No block history yet.</td>
+                </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    {% if selected_summary %}
+        <div class="card mt-4">
+            <div class="card-body">
+                <h5 class="card-title">{{ selected_summary.sender }}</h5>
+                <p class="card-text">
+                    <strong>Display name:</strong> {{ selected_summary.sender_display_name|default:"n/a" }}<br>
+                    <strong>Locally blocked:</strong> {% if selected_summary.is_locally_blocked %}Yes{% else %}No (history only){% endif %}<br>
+                    <strong>Block events:</strong> {{ selected_summary.event_count }}
+                </p>
+
+                <h6>Event history</h6>
+                <ul>
+                    {% for event in selected_summary.events %}
+                        <li>
+                            {{ event.timestamp_utc }} via {{ event.source }}
+                            (provider={{ event.provider|default:"n/a" }},
+                            messages={{ event.message_count|default:"n/a" }})<br>
+                            subjects:
+                            {% if event.message_subjects %}
+                                {{ event.message_subjects|join:"; " }}
+                            {% else %}
+                                n/a
+                            {% endif %}
+                        </li>
+                    {% empty %}
+                        <li class="text-muted">No events recorded.</li>
+                    {% endfor %}
+                </ul>
+
+                {% if selected_summary.is_locally_blocked %}
+                    <form method="post">
+                        {% csrf_token %}
+                        <button type="submit" name="unblock" value="{{ selected_summary.sender }}" class="btn btn-outline-dark btn-sm">Unblock</button>
+                    </form>
+                {% endif %}
+            </div>
+        </div>
+    {% elif selected_sender %}
+        <p class="text-muted mt-3">No record found for &ldquo;{{ selected_sender }}&rdquo;.</p>
+    {% endif %}
+</div>
+{% endblock %}

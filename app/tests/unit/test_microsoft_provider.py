@@ -591,6 +591,38 @@ def test_block_senders_records_events_with_explicit_source(tmp_path: Path, monke
     assert [e.source for e in fake_tracker.recorded] == ['desktop_email_client']
 
 
+def test_block_senders_records_display_name_and_subjects_from_sender_details(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider(tmp_path)
+    monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: {'access_token': 'at'})
+    monkeypatch.setattr(microsoft_provider_module.time, 'sleep', lambda s: None)
+    fake_tracker = _FakeBlockedSenderTracker()
+    monkeypatch.setattr(provider, 'blocked_sender_tracker', fake_tracker)
+    monkeypatch.setattr(microsoft_provider_module.requests, 'post', lambda url, headers=None, json=None: _FakeResponse(status_code=201))
+
+    provider.block_senders(
+        'user1', ['Alice'],
+        sender_details={'Alice': {'display_name': 'Alice Spammer', 'subjects': ['Buy now', 'Act fast', 'Extra', 'Extra2', 'Extra3', 'Extra4']}},
+    )
+
+    assert [e.sender_display_name for e in fake_tracker.recorded] == ['Alice Spammer']
+    # Capped to MAX_TRACKED_SUBJECTS (5), even though 6 were supplied.
+    assert [e.message_subjects for e in fake_tracker.recorded] == [['Buy now', 'Act fast', 'Extra', 'Extra2', 'Extra3']]
+
+
+def test_block_senders_leaves_display_name_and_subjects_none_without_sender_details(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider(tmp_path)
+    monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: {'access_token': 'at'})
+    monkeypatch.setattr(microsoft_provider_module.time, 'sleep', lambda s: None)
+    fake_tracker = _FakeBlockedSenderTracker()
+    monkeypatch.setattr(provider, 'blocked_sender_tracker', fake_tracker)
+    monkeypatch.setattr(microsoft_provider_module.requests, 'post', lambda url, headers=None, json=None: _FakeResponse(status_code=201))
+
+    provider.block_senders('user1', ['Alice'])
+
+    assert [e.sender_display_name for e in fake_tracker.recorded] == [None]
+    assert [e.message_subjects for e in fake_tracker.recorded] == [None]
+
+
 def test_block_senders_only_records_successful_senders_and_returns_false_on_partial_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     provider = _provider(tmp_path)
     monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: {'access_token': 'at'})

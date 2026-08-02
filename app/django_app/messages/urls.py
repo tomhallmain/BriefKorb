@@ -12,5 +12,6 @@ urlpatterns = [
     path('messages/inbox', views.inbox_view, name='inbox'),
     path('messages/read/<str:provider>/<str:message_id>/', views.message_detail_view, name='message_detail'),
     path('messages/categorization', views.sender_categorization_view, name='sender_categorization'),
+    path('messages/blocked-senders', views.blocked_senders_view, name='blocked_senders'),
     path('api/messages', views.messages_api_view, name='messages_api'),
 ]

@@ -15,6 +15,7 @@ from .utils.logger import setup_logger
 from .utils.datetime_compat import normalize_received_at_utc
 from .auth import TokenManager
 from .blocklist import SenderBlocklist
+from .blocked_sender_tracking import BlockedSenderTracker, group_events_by_sender
 
 # Set up logger
 logger = setup_logger('email_server')
@@ -114,7 +115,13 @@ class EmailProvider(ABC):
         pass
 
     @abstractmethod
-    def block_senders(self, user_id: str, sender_names: List[str], source: str = 'api') -> bool:
+    def block_senders(
+        self,
+        user_id: str,
+        sender_names: List[str],
+        source: str = 'api',
+        sender_details: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> bool:
         """Block future mail from the given senders for a user, where the
         provider supports it server-side.
 
@@ -126,6 +133,12 @@ class EmailProvider(ABC):
         `source` identifies the caller for the block-event audit trail
         (e.g. 'django_web_messages', 'desktop_email_client') -- it does
         not affect blocking behavior itself.
+
+        `sender_details`, keyed by the exact strings in `sender_names`,
+        optionally carries `{'display_name': str, 'subjects': List[str]}`
+        per sender -- richer context for the block-event audit trail (see
+        BlockEvent.sender_display_name/message_subjects) beyond just the
+        matching string used to create the block itself.
         """
         pass
 
@@ -151,6 +164,7 @@ class UnifiedEmailServer:
         logger.info(f"Created shared TokenManager with storage path: {config.token_storage_path}")
 
         self.blocklist = SenderBlocklist(config.token_storage_path)
+        self.blocked_sender_tracker = BlockedSenderTracker(config.token_storage_path)
 
         self.entity_graph_manager = self._init_entity_graph_manager(config.token_storage_path)
 
@@ -541,7 +555,14 @@ class UnifiedEmailServer:
 
         return success
 
-    def block_senders(self, user_id: str, provider_name: str, sender_names: List[str], source: str = 'api') -> bool:
+    def block_senders(
+        self,
+        user_id: str,
+        provider_name: str,
+        sender_names: List[str],
+        source: str = 'api',
+        sender_details: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> bool:
         """Block future mail from the given senders for a user using the
         specified provider, where that provider supports it (see
         EmailProvider.block_senders -- not every provider has an
@@ -556,7 +577,7 @@ class UnifiedEmailServer:
             logger.warning(f"Authentication failed for user {user_id} with provider {provider_name}")
             return False
 
-        success = provider.block_senders(user_id, sender_names, source=source)
+        success = provider.block_senders(user_id, sender_names, source=source, sender_details=sender_details)
 
         if success:
             logger.info(f"Successfully blocked {len(sender_names)} sender(s) for user {user_id} with provider {provider_name}")
@@ -580,9 +601,29 @@ class UnifiedEmailServer:
         """Add an address to the local suppression list (see is_sender_blocked)."""
         self.blocklist.block(email)
 
+    def unblock_sender(self, email: str) -> None:
+        """Remove an address from the local suppression list."""
+        self.blocklist.unblock(email)
+
     def get_blocked_senders(self) -> Set[str]:
         """Return the full local suppression list."""
         return self.blocklist.get_all()
+
+    def get_block_events(self, sender: Optional[str] = None, since: Optional[datetime] = None) -> List[Dict[str, Any]]:
+        """Return recorded block-event audit history, newest first. See
+        BlockedSenderTracker.get_events for filter semantics."""
+        return self.blocked_sender_tracker.get_events(sender=sender, since=since)
+
+    def get_blocked_sender_summary(self, sender: Optional[str] = None) -> List[Dict[str, Any]]:
+        """One summary row per sender that has ever appeared in the block-
+        event audit log, each carrying that sender's full event history
+        (see group_events_by_sender) plus whether it's currently in the
+        local suppression list (is_locally_blocked) -- the one call a
+        blocked-senders viewer needs, in either client."""
+        summaries = group_events_by_sender(self.get_block_events(sender=sender))
+        for summary in summaries:
+            summary['is_locally_blocked'] = self.is_sender_blocked(summary['sender'])
+        return summaries
 
 # Import providers at the end to avoid circular imports
 # These imports must come after EmailProvider and EmailMessage are defined

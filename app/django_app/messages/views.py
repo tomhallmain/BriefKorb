@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from email_server import UnifiedEmailServer
 from email_server.config import EmailServerConfig
+from email_server.blocked_sender_tracking import MAX_TRACKED_SUBJECTS
 from email_client.utils.sender_categorization import ImpactLevel, SenderCategorizationManager
 from .services import annotate_sender_impact
 from django_app.authentication import require_external_api_token
@@ -72,7 +73,16 @@ def _perform_bulk_action(request, server: UnifiedEmailServer, action: str, selec
             success = server.delete_user_messages(user_id, provider_name, message_ids)
         else:  # deleteMessageBlockSender
             delete_success = server.delete_user_messages(user_id, provider_name, message_ids)
-            block_success = server.block_senders(user_id, provider_name, sender_names, source='django_web_messages')
+            sender_details = {
+                b['fromName']: {
+                    'display_name': b['fromName'],
+                    'subjects': [m['subject'] for m in b['messages']][:MAX_TRACKED_SUBJECTS],
+                }
+                for b in buckets
+            }
+            block_success = server.block_senders(
+                user_id, provider_name, sender_names, source='django_web_messages', sender_details=sender_details,
+            )
             success = delete_success and block_success
             if delete_success and not block_success:
                 any_block_failed = True
@@ -412,5 +422,47 @@ def sender_categorization_view(request):
     return render(request, 'django_app/messages/sender_categorization.html', {
         'records': records,
         'selected_record': selected_record,
+        'selected_sender': selected_sender,
+    })
+
+
+def blocked_senders_view(request):
+    """Browse blocked-sender history (audit log, not live provider-side
+    enforcement state -- see UnifiedEmailServer.get_blocked_sender_summary)
+    and unblock a sender's local suppression. Same list + `?sender=`
+    -selected-detail shape as sender_categorization_view.
+
+    Deliberately constructs UnifiedEmailServer directly rather than via
+    _load_authenticated_server: viewing/unblocking is pure local-cache
+    work and shouldn't require a currently-authenticated provider, the
+    same reasoning sender_categorization_view already applies by skipping
+    that helper entirely.
+    """
+    config, error = _load_config()
+    if not error and not (config.microsoft.enabled or config.gmail.enabled):
+        error = 'No email provider is configured on this BriefKorb instance.'
+    if error:
+        return render(request, 'django_app/messages/blocked_senders.html', {
+            'summaries': [], 'error': error,
+        })
+    server = UnifiedEmailServer(config=config)
+
+    if request.method == 'POST':
+        unblock_sender = request.POST.get('unblock', '').strip().lower()
+        if unblock_sender:
+            server.unblock_sender(unblock_sender)
+            django_messages.success(request, f"Unblocked {unblock_sender}.")
+        redirect_url = reverse('django_app.messages:blocked_senders')
+        if unblock_sender:
+            redirect_url += f'?sender={unblock_sender}'
+        return redirect(redirect_url)
+
+    summaries = server.get_blocked_sender_summary()
+    selected_sender = request.GET.get('sender', '').strip().lower()
+    selected_summary = next((s for s in summaries if s['sender'] == selected_sender), None) if selected_sender else None
+
+    return render(request, 'django_app/messages/blocked_senders.html', {
+        'summaries': summaries,
+        'selected_summary': selected_summary,
         'selected_sender': selected_sender,
     })

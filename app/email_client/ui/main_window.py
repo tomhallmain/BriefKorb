@@ -20,13 +20,14 @@ from PySide6.QtGui import QFont, QTextDocument
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from email_server import UnifiedEmailServer, EmailMessage, AuthenticatedProvider
 from email_server.config import EmailServerConfig
-from email_server.blocked_sender_tracking import BlockedSenderTracker, BlockEvent
+from email_server.blocked_sender_tracking import BlockEvent, MAX_TRACKED_SUBJECTS
 from lib.multi_display_qt import SmartMainWindow
 
 from widgets.message_list_item import MessageListItem
 from widgets.compose_dialog import ComposeDialog
 from ui.auth_settings_dialog import AuthSettingsDialog
 from ui.sender_categorization_window import SenderCategorizationWindow
+from ui.blocked_senders_window import BlockedSendersWindow
 from email_client.utils.scope_checker import ScopeChecker
 from email_client.utils.message_grouping import MessageGroup, group_messages_by_sender
 from email_client.utils.content_type import ContentType
@@ -68,9 +69,9 @@ class MainWindow(SmartMainWindow):
         self.entity_extraction_worker: Optional[EntityExtractionWorkerThread] = None
         self.config: Optional[EmailServerConfig] = None
         self.config_path: Optional[str] = None
-        self.blocked_sender_tracker: Optional[BlockedSenderTracker] = None
         self.sender_categorization: Optional[SenderCategorizationManager] = None
         self.sender_categorization_window: Optional[SenderCategorizationWindow] = None
+        self.blocked_senders_window: Optional[BlockedSendersWindow] = None
         # Desired splitter widths — updated only when the user drags the handle.
         # Used to restore positions after content-driven layout passes.
         self._splitter_sizes: List[int] = [400, 600]
@@ -171,7 +172,12 @@ class MainWindow(SmartMainWindow):
         self.categorization_btn = QPushButton("Categorize Senders")
         self.categorization_btn.clicked.connect(self._open_sender_categorization)
         layout.addWidget(self.categorization_btn)
-        
+
+        # Blocked senders button
+        self.blocked_senders_btn = QPushButton("Blocked Senders")
+        self.blocked_senders_btn.clicked.connect(self._open_blocked_senders)
+        layout.addWidget(self.blocked_senders_btn)
+
         layout.addStretch()
         
         return toolbar
@@ -376,7 +382,6 @@ class MainWindow(SmartMainWindow):
             
             self.config = EmailServerConfig.from_file(str(config_path))
             self.server = UnifiedEmailServer(config=self.config)
-            self.blocked_sender_tracker = BlockedSenderTracker(self.config.token_storage_path)
             self.sender_categorization = SenderCategorizationManager(self.config.token_storage_path)
             self._update_ui_permissions()
             self._update_auth_status()
@@ -1110,6 +1115,10 @@ class MainWindow(SmartMainWindow):
 
         self.server.block_sender(sender)
 
+        display_name = group.display_name
+        subjects = [m.subject for m in group.messages][:MAX_TRACKED_SUBJECTS]
+        sender_details = {sender: {'display_name': display_name, 'subjects': subjects}}
+
         # Best-effort: also create a durable, provider-side block where the
         # provider supports it (e.g. a Microsoft Graph inbox rule). Not every
         # provider does (Gmail returns False) -- that's fine, the local
@@ -1121,18 +1130,19 @@ class MainWindow(SmartMainWindow):
             auth_prov = self._get_auth_provider_for_message(messages[0])
             if not auth_prov:
                 continue
-            self.server.block_senders(auth_prov.user_id, provider_name, [sender], source="desktop_email_client")
+            self.server.block_senders(auth_prov.user_id, provider_name, [sender], source="desktop_email_client", sender_details=sender_details)
 
-        if self.blocked_sender_tracker:
-            self.blocked_sender_tracker.record(
-                BlockEvent(
-                    sender=sender,
-                    source="desktop_email_client",
-                    sender_kind="email",
-                    message_count=group.count,
-                    sender_domain=group.sender_domain,
-                )
+        self.server.blocked_sender_tracker.record(
+            BlockEvent(
+                sender=sender,
+                source="desktop_email_client",
+                sender_kind="email",
+                message_count=group.count,
+                sender_domain=group.sender_domain,
+                sender_display_name=display_name,
+                message_subjects=subjects,
             )
+        )
         self._do_delete_group(group)
         self.statusBar.showMessage(f"Blocked {sender} and deleted their messages")
 
@@ -1396,3 +1406,17 @@ class MainWindow(SmartMainWindow):
         self.sender_categorization_window.show()
         self.sender_categorization_window.raise_()
         self.sender_categorization_window.activateWindow()
+
+    def _open_blocked_senders(self):
+        """Open blocked senders viewer window."""
+        if not self.server:
+            QMessageBox.warning(self, "Not Ready", "Server is not available yet.")
+            return
+        if self.blocked_senders_window is None:
+            self.blocked_senders_window = BlockedSendersWindow(
+                server=self.server,
+                parent=self,
+            )
+        self.blocked_senders_window.show()
+        self.blocked_senders_window.raise_()
+        self.blocked_senders_window.activateWindow()

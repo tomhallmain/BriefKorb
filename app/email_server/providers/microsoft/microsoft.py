@@ -10,7 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, wait, Future
 from ...auth import MicrosoftOAuth, TokenManager
 from ... import EmailProvider, EmailMessage
-from ...blocked_sender_tracking import BlockedSenderTracker, BlockEvent
+from ...blocked_sender_tracking import BlockedSenderTracker, BlockEvent, MAX_TRACKED_SUBJECTS
 from ...utils.logger import setup_logger
 
 # Set up logger
@@ -352,13 +352,22 @@ class MicrosoftGraphProvider(EmailProvider):
             logger.error(f"Failed to delete messages for user {user_id}: {str(e)}")
             return False
 
-    def block_senders(self, user_id: str, sender_names: List[str], source: str = 'api') -> bool:
+    def block_senders(
+        self,
+        user_id: str,
+        sender_names: List[str],
+        source: str = 'api',
+        sender_details: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> bool:
         """Create inbox rules that auto-delete future mail from each sender,
         with retry logic and parallel processing (same pattern as
         mark_as_read/delete_messages). Successful rule creations are
         recorded via BlockedSenderTracker for future auto-block analysis,
         tagged with `source` (identifies the caller, e.g.
-        'django_web_messages' or 'desktop_email_client').
+        'django_web_messages' or 'desktop_email_client') and, where the
+        caller supplied it via `sender_details`, the sender's display name
+        and the message subject(s) that prompted the block -- context for
+        understanding the block's real cause later, not used for matching.
         """
         if not sender_names:
             return True
@@ -413,6 +422,8 @@ class MicrosoftGraphProvider(EmailProvider):
 
             # Persist successful manual block actions for future auto-block models.
             for sender_name in successful_senders:
+                detail = (sender_details or {}).get(sender_name, {})
+                subjects = detail.get('subjects') or []
                 self.blocked_sender_tracker.record(
                     BlockEvent(
                         sender=sender_name,
@@ -420,6 +431,8 @@ class MicrosoftGraphProvider(EmailProvider):
                         sender_kind='display_name',
                         provider='microsoft',
                         mailbox='inbox',
+                        sender_display_name=detail.get('display_name'),
+                        message_subjects=subjects[:MAX_TRACKED_SUBJECTS] or None,
                     )
                 )
 

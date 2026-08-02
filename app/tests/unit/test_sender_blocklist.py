@@ -85,3 +85,22 @@ def test_get_all_returns_a_copy(fake_cache: FakeAppInfoCache) -> None:
     result.add("not-actually-blocked@example.com")
 
     assert sut.get_all() == {"spam@example.com"}
+
+
+def test_unblock_removes_a_blocked_address(fake_cache: FakeAppInfoCache) -> None:
+    sut = SenderBlocklist(storage_path="ignored")
+    sut.block("spam@example.com")
+
+    sut.unblock("Spam@Example.COM")
+
+    assert sut.get_all() == set()
+    assert fake_cache.data[SenderBlocklist.CACHE_KEY] == []
+
+
+def test_unblock_is_a_no_op_for_address_never_blocked(fake_cache: FakeAppInfoCache) -> None:
+    sut = SenderBlocklist(storage_path="ignored")
+    sut.block("other@example.com")
+
+    sut.unblock("never-blocked@example.com")
+
+    assert sut.get_all() == {"other@example.com"}
