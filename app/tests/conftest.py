@@ -12,6 +12,13 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 
+# GUI (PySide6/pytest-qt) tests need a Qt platform plugin. There is no
+# display in CI/sandboxed environments, so default to the "offscreen" one
+# unless the environment already picked a real platform (e.g. a developer
+# running the suite locally with a display attached).
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+
 if "keyring" not in sys.modules:
     _store: dict[tuple[str, str], str] = {}
     keyring_stub = types.ModuleType("keyring")

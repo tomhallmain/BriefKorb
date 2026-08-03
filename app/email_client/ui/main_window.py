@@ -237,20 +237,30 @@ class MainWindow(SmartMainWindow):
         
         # Message navigation bar (for messages within a group)
         nav_layout = QHBoxLayout()
+        self.first_msg_btn = QPushButton("|◀ First")
+        self.first_msg_btn.clicked.connect(self._first_message)
+        self.first_msg_btn.setEnabled(False)
+        nav_layout.addWidget(self.first_msg_btn)
+
         self.prev_msg_btn = QPushButton("◀ Previous")
         self.prev_msg_btn.clicked.connect(self._previous_message)
         self.prev_msg_btn.setEnabled(False)
         nav_layout.addWidget(self.prev_msg_btn)
-        
+
         self.message_nav_label = QLabel("No messages")
         self.message_nav_label.setAlignment(Qt.AlignCenter)
         nav_layout.addWidget(self.message_nav_label)
-        
+
         self.next_msg_btn = QPushButton("Next ▶")
         self.next_msg_btn.clicked.connect(self._next_message)
         self.next_msg_btn.setEnabled(False)
         nav_layout.addWidget(self.next_msg_btn)
-        
+
+        self.last_msg_btn = QPushButton("Last ▶|")
+        self.last_msg_btn.clicked.connect(self._last_message)
+        self.last_msg_btn.setEnabled(False)
+        nav_layout.addWidget(self.last_msg_btn)
+
         layout.addLayout(nav_layout)
         
         # Message header
@@ -768,8 +778,10 @@ class MainWindow(SmartMainWindow):
         )
         
         # Update navigation buttons
+        self.first_msg_btn.setEnabled(self.current_message_index > 0)
         self.prev_msg_btn.setEnabled(self.current_message_index > 0)
         self.next_msg_btn.setEnabled(self.current_message_index < len(group.messages) - 1)
+        self.last_msg_btn.setEnabled(self.current_message_index < len(group.messages) - 1)
         
         # Update subject
         self.subject_label.setText(message.subject or "(No Subject)")
@@ -892,24 +904,44 @@ class MainWindow(SmartMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Save Debug HTML", f"Could not save debug HTML:\n{e}")
 
+    def _first_message(self):
+        """Navigate to the first message in the current group"""
+        if self.current_group_index is None:
+            return
+
+        if self.current_message_index != 0:
+            self.current_message_index = 0
+            self._display_current_message()
+
     def _previous_message(self):
         """Navigate to previous message in current group"""
         if self.current_group_index is None:
             return
-        
+
         group = self.current_groups[self.current_group_index]
         if self.current_message_index > 0:
             self.current_message_index -= 1
             self._display_current_message()
-    
+
     def _next_message(self):
         """Navigate to next message in current group"""
         if self.current_group_index is None:
             return
-        
+
         group = self.current_groups[self.current_group_index]
         if self.current_message_index < len(group.messages) - 1:
             self.current_message_index += 1
+            self._display_current_message()
+
+    def _last_message(self):
+        """Navigate to the last message in the current group"""
+        if self.current_group_index is None:
+            return
+
+        group = self.current_groups[self.current_group_index]
+        last_index = len(group.messages) - 1
+        if self.current_message_index != last_index:
+            self.current_message_index = last_index
             self._display_current_message()
     
     def _get_auth_provider_for_message(self, message):
@@ -1054,8 +1086,10 @@ class MainWindow(SmartMainWindow):
             self.subject_label.setText("Select a message group to view")
             self.metadata_label.clear()
             self.message_nav_label.setText("No messages")
+            self.first_msg_btn.setEnabled(False)
             self.prev_msg_btn.setEnabled(False)
             self.next_msg_btn.setEnabled(False)
+            self.last_msg_btn.setEnabled(False)
             self.mark_read_btn.setEnabled(False)
             self.mark_all_read_btn.setEnabled(False)
             self.delete_all_btn.setEnabled(False)
@@ -1194,8 +1228,10 @@ class MainWindow(SmartMainWindow):
                     self.subject_label.setText("Select a message group to view")
                     self.metadata_label.clear()
                     self.message_nav_label.setText("No messages")
+                    self.first_msg_btn.setEnabled(False)
                     self.prev_msg_btn.setEnabled(False)
                     self.next_msg_btn.setEnabled(False)
+                    self.last_msg_btn.setEnabled(False)
                     self.mark_read_btn.setEnabled(False)
                     self.mark_all_read_btn.setEnabled(False)
                     self.delete_all_btn.setEnabled(False)
