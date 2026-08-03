@@ -91,6 +91,13 @@
                 </label>
                 <button type="submit" name="highImpactOnly" class="btn btn-secondary btn-sm ml-2">Update</button>
             </div>
+            <div class="col">
+                <label>
+                    <input type="checkbox" name="oldestFirst" value="oldestFirst" {% if oldest_first %}checked{% endif %}>
+                    Oldest First
+                </label>
+                <button type="submit" name="oldestFirst" class="btn btn-secondary btn-sm ml-2">Update</button>
+            </div>
         </div>
         <br>
         <table class="table sortable">
@@ -118,7 +125,7 @@
                             <td>{{ messageInfo.fromName }}</td>
                             <td>{{ messageInfo.fromAddress }}</td>
                             <td>{{ messageInfo.subject }}</td>
-                            <td>
+                            <td {% if messageInfo.lastReceivedDateTime %}data-sort="{{ messageInfo.lastReceivedDateTime|date:'U' }}"{% endif %}>
                                 {% if messageInfo.lastReceivedDateTime %}
                                     {{ messageInfo.lastReceivedDateTime|date:"n/d/Y g:i A" }}
                                 {% else %}

@@ -17,6 +17,10 @@
                 <input type="checkbox" name="unread_only" value="true" {% if unread_only %}checked{% endif %}>
                 Unread only
             </label>
+            <label class="mr-2 ml-3">
+                <input type="checkbox" name="oldest_first" value="true" {% if oldest_first %}checked{% endif %}>
+                Oldest first
+            </label>
             <button type="submit" class="btn btn-secondary btn-sm ml-2">Update</button>
         </form>
 

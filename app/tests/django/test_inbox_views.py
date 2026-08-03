@@ -104,6 +104,48 @@ def test_inbox_view_passes_mailbox_and_unread_only_query_params(client: Client, 
     assert fake_server.get_user_messages_calls[0]['unread_only'] is False
 
 
+def test_inbox_view_oldest_first_sorts_message_data_ascending(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_config(tmp_path)
+    fake_server = FakeUnifiedEmailServer(
+        authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')],
+        digest=[
+            {'fromName': 'Newest', 'fromAddress': 'newest@example.com', 'provider': 'microsoft', 'count': 1,
+             'messages': [], 'lastReceivedDateTime': '2024-03-01T00:00:00+00:00'},
+            {'fromName': 'Oldest', 'fromAddress': 'oldest@example.com', 'provider': 'microsoft', 'count': 1,
+             'messages': [], 'lastReceivedDateTime': '2024-01-01T00:00:00+00:00'},
+        ],
+    )
+    _patch_server(monkeypatch, fake_server)
+
+    response = client.get(reverse('django_app.messages:inbox') + '?oldest_first=true')
+
+    assert [b['fromAddress'] for b in response.context['messageData']] == [
+        'oldest@example.com', 'newest@example.com',
+    ]
+    assert response.context['oldest_first'] is True
+
+
+def test_inbox_view_oldest_first_defaults_false_and_leaves_digest_order_unchanged(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_config(tmp_path)
+    fake_server = FakeUnifiedEmailServer(
+        authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')],
+        digest=[
+            {'fromName': 'Newest', 'fromAddress': 'newest@example.com', 'provider': 'microsoft', 'count': 1,
+             'messages': [], 'lastReceivedDateTime': '2024-03-01T00:00:00+00:00'},
+            {'fromName': 'Oldest', 'fromAddress': 'oldest@example.com', 'provider': 'microsoft', 'count': 1,
+             'messages': [], 'lastReceivedDateTime': '2024-01-01T00:00:00+00:00'},
+        ],
+    )
+    _patch_server(monkeypatch, fake_server)
+
+    response = client.get(reverse('django_app.messages:inbox'))
+
+    assert [b['fromAddress'] for b in response.context['messageData']] == [
+        'newest@example.com', 'oldest@example.com',
+    ]
+    assert response.context['oldest_first'] is False
+
+
 def test_inbox_view_shows_error_when_fetch_raises(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_config(tmp_path)
     fake_server = FakeUnifiedEmailServer(

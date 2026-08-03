@@ -167,6 +167,50 @@ def test_messages_view_high_impact_only_filters_message_data(client: Client, tmp
     assert response.context['messageData'][0]['fromAddress'] == 'a@example.com'
 
 
+def test_messages_view_oldest_first_sorts_message_data_ascending(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_config(tmp_path)
+    _patch_sender_categorization(monkeypatch)
+    fake_server = FakeUnifiedEmailServer(
+        authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')],
+        digest=[
+            _bucket('microsoft', 'Newest', 'newest@example.com', ['m1'], lastReceivedDateTime='2024-03-01T00:00:00+00:00'),
+            _bucket('microsoft', 'Oldest', 'oldest@example.com', ['m2'], lastReceivedDateTime='2024-01-01T00:00:00+00:00'),
+            _bucket('microsoft', 'Middle', 'middle@example.com', ['m3'], lastReceivedDateTime='2024-02-01T00:00:00+00:00'),
+        ],
+    )
+    _patch_server(monkeypatch, fake_server)
+
+    response = client.post(reverse('django_app.messages:messages'), {'oldestFirst': 'on'})
+
+    assert [b['fromAddress'] for b in response.context['messageData']] == [
+        'oldest@example.com', 'middle@example.com', 'newest@example.com',
+    ]
+    assert response.context['oldest_first'] is True
+
+
+def test_messages_view_without_oldest_first_key_leaves_digest_order_unchanged(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_config(tmp_path)
+    _patch_sender_categorization(monkeypatch)
+    fake_server = FakeUnifiedEmailServer(
+        authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')],
+        digest=[
+            _bucket('microsoft', 'Newest', 'newest@example.com', ['m1'], lastReceivedDateTime='2024-03-01T00:00:00+00:00'),
+            _bucket('microsoft', 'Oldest', 'oldest@example.com', ['m2'], lastReceivedDateTime='2024-01-01T00:00:00+00:00'),
+        ],
+    )
+    _patch_server(monkeypatch, fake_server)
+
+    response = client.post(reverse('django_app.messages:messages'), {})
+
+    # No oldestFirst key at all -- distinct from oldestFirst being present
+    # but unchecked -- must leave get_message_digest()'s own order (by
+    # count, not date) untouched, matching this view's pre-existing default.
+    assert [b['fromAddress'] for b in response.context['messageData']] == [
+        'newest@example.com', 'oldest@example.com',
+    ]
+    assert response.context['oldest_first'] is False
+
+
 # --- messages_view: POST mailbox / exclude-read toggles -----------------------
 
 def test_messages_view_post_mailbox_selection_changes_mailbox(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

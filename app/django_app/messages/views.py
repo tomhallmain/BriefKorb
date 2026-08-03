@@ -130,6 +130,7 @@ def messages_view(request):
     mailbox = 'inbox'
     exclude_read = True
     high_impact_only = False
+    oldest_first = False
     has_performed_update = False
 
     try:
@@ -147,6 +148,8 @@ def messages_view(request):
                 exclude_read = bool(request.POST.getlist('excludeRead'))
             if 'highImpactOnly' in request.POST:
                 high_impact_only = bool(request.POST.getlist('highImpactOnly'))
+            if 'oldestFirst' in request.POST:
+                oldest_first = bool(request.POST.getlist('oldestFirst'))
 
             set_impact_value = request.POST.get('setImpact', '').strip()
             clear_impact_sender = request.POST.get('clearImpact', '').strip()
@@ -196,6 +199,15 @@ def messages_view(request):
                 if msg_info.get('impact') == ImpactLevel.HIGH_IMPACT.value
             ]
 
+        if oldest_first:
+            # Sort on the raw ISO-8601 lastReceivedDateTime string, before
+            # it's parsed into a datetime object below -- received_date is
+            # always UTC-normalized (see normalize_received_at_utc()), so
+            # lexical string sort here is equivalent to chronological sort,
+            # and doing it here avoids sorting a list that could otherwise
+            # mix datetime and str (if the parse below hits its except).
+            message_data = sorted(message_data, key=lambda msg_info: msg_info.get('lastReceivedDateTime') or '')
+
         # Parse dates for template
         for msg_info in message_data:
             if msg_info.get('lastReceivedDateTime'):
@@ -210,6 +222,7 @@ def messages_view(request):
             'mailbox': mailbox,
             'exclude_read_messages': exclude_read,
             'high_impact_only': high_impact_only,
+            'oldest_first': oldest_first,
             'has_performed_update': has_performed_update,
             'is_authenticated': True,
         }
@@ -372,10 +385,18 @@ def inbox_view(request):
 
     mailbox = request.GET.get('mailbox', 'inbox')
     unread_only = _parse_bool_param(request, 'unread_only', default=True)
+    oldest_first = _parse_bool_param(request, 'oldest_first', default=False)
 
     try:
         messages = server.get_user_messages(folder=mailbox, unread_only=unread_only, max_messages=1000)
         message_data = server.get_message_digest(messages=messages)
+        if oldest_first:
+            # lastReceivedDateTime is an ISO-8601 string (see
+            # UnifiedEmailServer.get_message_digest) built from received_date
+            # values that are always UTC-normalized before this point (see
+            # normalize_received_at_utc()), so lexical string sort here is
+            # equivalent to chronological sort -- no datetime parsing needed.
+            message_data = sorted(message_data, key=lambda bucket: bucket.get('lastReceivedDateTime') or '')
         # Non-fatal if entity_graph is unavailable -- extract_entities()
         # already returns 0 in that case rather than raising.
         entity_count = server.extract_entities(messages)
@@ -389,6 +410,7 @@ def inbox_view(request):
         'messages_length': len(messages),
         'mailbox': mailbox,
         'unread_only': unread_only,
+        'oldest_first': oldest_first,
         'entity_count': entity_count,
         'is_authenticated': True,
     })
