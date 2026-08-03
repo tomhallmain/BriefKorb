@@ -690,8 +690,11 @@ class MainWindow(SmartMainWindow):
             self.message_list.addItem(item)
         
         total_messages = sum(g.count for g in groups_to_show)
+        total_unread = sum(g.unread_count for g in groups_to_show)
+        total_read = total_messages - total_unread
         self.message_count_label.setText(
-            f"Showing {len(groups_to_show)} groups ({total_messages} messages)"
+            f"Showing {len(groups_to_show)} groups ({total_messages} messages — "
+            f"{total_unread} unread, {total_read} read)"
         )
     
     def _on_message_selected(self, item: QListWidgetItem):
