@@ -82,17 +82,35 @@ class SenderCategorizationManager:
         return self.get_sender_impact(sender_email) == ImpactLevel.HIGH_IMPACT
 
     def is_high_impact_group(self, group: MessageGroup) -> bool:
-        return self.is_high_impact_sender(group.sender_email)
+        """True if ANY sender in the group is high-impact.
+
+        Permissive on purpose: for a multi-sender domain group (see
+        message_grouping.merge_groups_by_domain), this shouldn't get hidden
+        from the "High-Impact Only" filter just because it's bundled with
+        less-important senders from the same domain. For an ordinary
+        single-sender group (sender_emails is always a 1-tuple there), this
+        is exactly the old sender_email-only check.
+        """
+        return any(self.is_high_impact_sender(addr) for addr in group.sender_emails)
+
+    def is_low_impact_sender(self, sender_email: str) -> bool:
+        return self.get_sender_impact(sender_email) == ImpactLevel.LOW_IMPACT
 
     def is_low_impact_group(self, group: MessageGroup) -> bool:
-        return self.get_sender_impact(group.sender_email) == ImpactLevel.LOW_IMPACT
+        """True only if ALL senders in the group are low-impact.
 
-    def is_suspected_bot_spam_group(self, group: MessageGroup) -> bool:
+        Conservative on purpose (opposite of is_high_impact_group's
+        any()): one confirmed-low-impact sender shouldn't hide a whole
+        multi-sender domain group that also contains someone important.
+        """
+        return all(self.is_low_impact_sender(addr) for addr in group.sender_emails)
+
+    def is_suspected_bot_spam_sender(self, sender_email: str) -> bool:
         """True if the last stored inference for this sender was low-impact due to bot/spam heuristics.
 
-        Manual impact exceptions hide the group from this filter (sender was explicitly reclassified).
+        Manual impact exceptions hide the sender from this filter (explicitly reclassified).
         """
-        sender = group.sender_email.lower().strip()
+        sender = sender_email.lower().strip()
         exceptions = self._get_dict(self.EXCEPTIONS_KEY)
         if sender in exceptions:
             return False
@@ -102,6 +120,19 @@ class SenderCategorizationManager:
             return False
         trace = rec.get("decision_trace") or []
         return isinstance(trace, list) and "decision:bot_spam_low" in trace
+
+    def is_suspected_bot_spam_group(self, group: MessageGroup) -> bool:
+        """True only if ALL senders in the group are suspected bot/spam --
+        same conservative reasoning as is_low_impact_group."""
+        return all(self.is_suspected_bot_spam_sender(addr) for addr in group.sender_emails)
+
+    def is_personal_mailbox_domain(self, domain: str) -> bool:
+        """True for large consumer webmail domains (gmail.com, yahoo.com,
+        outlook.com, etc.) -- reuses the same list _personal_mailbox_inclusion()
+        already relies on, rather than a second hand-maintained one. Used by
+        the desktop client's "Group by Domain" mode to decide which domains
+        should never be merged across senders."""
+        return domain.lower().strip() in self._rules.personal_mailbox_domains
 
     def set_sender_exception(self, sender_email: str, impact: ImpactLevel, source: str = "manual_exception") -> None:
         sender = sender_email.lower().strip()

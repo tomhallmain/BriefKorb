@@ -1,7 +1,6 @@
 """Tests for the desktop client's "Low-Impact Senders" window, covering
 docs/code-briefkorb-tasks-*.tsv's "Default to separate view for low-impact
-(subscription and especially advertising) categories" item (see
-docs/low-impact-separate-view-spec.md for the design this implements).
+(subscription and especially advertising) categories" item.
 
 Confirmed low-impact senders (ImpactLevel.LOW_IMPACT, via
 SenderCategorizationManager) are excluded from the main message list by
@@ -30,22 +29,11 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QMessageBox  # noqa: E402
 
-from email_client.utils.sender_categorization import ImpactLevel, SenderCategorizationManager  # noqa: E402
+from email_client.utils.sender_categorization import ImpactLevel  # noqa: E402
 
 from helpers import make_group  # noqa: E402
 
-
-@pytest.fixture
-def window_with_categorization(window):
-    """The shared `window` fixture stubs _load_config() to a no-op (see
-    tests/ui/conftest.py), so window.sender_categorization is normally None
-    -- this feature is entirely gated on it, so tests need a real manager
-    wired in. storage_path is ignored in favor of BRIEFKORB_CACHE_DIR (set
-    by the autouse isolated_app_state fixture), same as
-    tests/unit/test_sender_categorization_inference.py's convention.
-    """
-    window.sender_categorization = SenderCategorizationManager(storage_path="ignored")
-    return window
+# window_with_categorization fixture is shared via tests/ui/conftest.py.
 
 
 def _set_impact(window, sender_email: str, impact: ImpactLevel) -> None:

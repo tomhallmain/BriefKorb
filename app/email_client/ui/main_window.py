@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Optional, List
 from datetime import datetime
+from email.utils import parseaddr
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
@@ -30,7 +31,7 @@ from ui.sender_categorization_window import SenderCategorizationWindow
 from ui.blocked_senders_window import BlockedSendersWindow
 from ui.low_impact_senders_window import LowImpactSendersWindow
 from email_client.utils.scope_checker import ScopeChecker
-from email_client.utils.message_grouping import MessageGroup, group_messages_by_sender
+from email_client.utils.message_grouping import MessageGroup, group_messages_by_sender, merge_groups_by_domain, extract_sender_email
 from email_client.utils.content_type import ContentType
 from email_client.utils.workers import EmailWorkerThread, MessageBodyWorkerThread, EntityExtractionWorkerThread, DEFAULT_MAX_MESSAGES
 from email_client.utils.html_utils import sanitize_html, convert_plain_text_to_html, is_html_content, strip_images_for_debug
@@ -62,6 +63,13 @@ class MainWindow(SmartMainWindow):
         super().__init__(restore_geometry=True)
         self.server: Optional[UnifiedEmailServer] = None
         self.current_messages: List[EmailMessage] = []
+        # Always the per-sender grouping, regardless of display mode --
+        # categorization/inference (infer_and_store_groups) must always run
+        # against this, never against a domain-merged group (see
+        # merge_groups_by_domain's docstring). current_groups is what's
+        # actually displayed; _rebuild_current_groups() derives it from
+        # this list based on group_by_domain_checkbox's state.
+        self._sender_groups: List[MessageGroup] = []
         self.current_groups: List[MessageGroup] = []
         self.current_group_index: Optional[int] = None
         self.current_message_index: int = 0
@@ -230,6 +238,15 @@ class MainWindow(SmartMainWindow):
         )
         self.oldest_first_checkbox.toggled.connect(self._on_oldest_first_toggled)
         filter_layout.addWidget(self.oldest_first_checkbox)
+        self.group_by_domain_checkbox = QPushButton("Group by Domain")
+        self.group_by_domain_checkbox.setCheckable(True)
+        self.group_by_domain_checkbox.setToolTip(
+            "Combine senders sharing an organization's domain into one group. Large consumer "
+            "webmail domains (gmail.com, yahoo.com, outlook.com, etc.) are never merged this way. "
+            "Requires sender categorization to be available."
+        )
+        self.group_by_domain_checkbox.toggled.connect(self._on_group_by_domain_toggled)
+        filter_layout.addWidget(self.group_by_domain_checkbox)
         self.unread_only_checkbox.toggled.connect(self._sync_filter_button_labels)
         filter_layout.addStretch()
         layout.addLayout(filter_layout)
@@ -602,10 +619,13 @@ class MainWindow(SmartMainWindow):
         # Blocked-sender filtering happens server-side, in
         # UnifiedEmailServer.get_user_messages().
         self.current_messages = messages
-        # Group messages by sender
-        self.current_groups = group_messages_by_sender(messages)
+        # Group messages by sender -- categorization/inference always runs
+        # against this real per-sender grouping, never against whatever
+        # "Group by Domain" merges for display (see _rebuild_current_groups).
+        self._sender_groups = group_messages_by_sender(messages)
         if self.sender_categorization:
-            self.sender_categorization.infer_and_store_groups(self.current_groups)
+            self.sender_categorization.infer_and_store_groups(self._sender_groups)
+        self._rebuild_current_groups()
         self.current_group_index = None
         self.current_message_index = 0
         self._update_message_list()
@@ -781,37 +801,72 @@ class MainWindow(SmartMainWindow):
         if not isinstance(group, MessageGroup):
             return
 
+        menu, actions = self._build_group_context_menu(group)
+        selected_action = menu.exec(self.message_list.mapToGlobal(position))
+        self._dispatch_group_context_menu_action(group, selected_action, actions)
+
+    def _build_group_context_menu(self, group: MessageGroup):
+        """Build (but don't show) the group right-click menu.
+
+        Split out from _show_group_context_menu so tests can inspect
+        actions' enabled/disabled state and tooltips without ever calling
+        QMenu.exec() -- monkeypatching that real, C++-backed native modal
+        call to intercept it isn't reliable across every Qt binding/platform
+        combination, and when it fails to actually take effect the real
+        exec() runs for real with no display input ever coming, which can
+        hang in a way even Ctrl+C can't interrupt (the native event loop
+        never yields back to Python to notice the pending signal).
+
+        Returns (menu, actions) where actions is a name -> QAction dict,
+        consumed by _dispatch_group_context_menu_action.
+        """
         menu = QMenu(self)
-        view_titles_action = menu.addAction("View Message Titles...")
+        actions = {"view_titles": menu.addAction("View Message Titles...")}
         menu.addSeparator()
-        mark_read_action = menu.addAction("Mark Group as Read")
-        delete_action = menu.addAction("Delete Group")
-        block_action = menu.addAction("Block Sender and Delete Group")
+        actions["mark_read"] = menu.addAction("Mark Group as Read")
+        actions["delete"] = menu.addAction("Delete Group")
+        actions["block"] = menu.addAction("Block Sender and Delete Group")
 
         if self.sender_categorization:
             menu.addSeparator()
-            high_impact_action = menu.addAction("Always treat sender as high-impact")
-            low_impact_action = menu.addAction("Always treat sender as low-impact")
-            clear_impact_action = menu.addAction("Clear impact override for this sender")
-        else:
-            high_impact_action = low_impact_action = clear_impact_action = None
+            actions["high_impact"] = menu.addAction("Always treat sender as high-impact")
+            actions["low_impact"] = menu.addAction("Always treat sender as low-impact")
+            actions["clear_impact"] = menu.addAction("Clear impact override for this sender")
+            if len(group.sender_emails) > 1:
+                # Impact overrides are inherently single-address operations
+                # -- rather than guess whether "apply to all N senders" is
+                # wanted, disable them for a multi-sender domain group and
+                # explain why. Switch off Group by Domain to reach these
+                # for one specific sender.
+                tooltip = (
+                    "Not available for multi-sender domain groups -- switch off "
+                    "Group by Domain to override an individual sender."
+                )
+                for key in ("high_impact", "low_impact", "clear_impact"):
+                    actions[key].setEnabled(False)
+                    actions[key].setToolTip(tooltip)
 
-        selected_action = menu.exec(self.message_list.mapToGlobal(position))
-        if selected_action is view_titles_action:
+        return menu, actions
+
+    def _dispatch_group_context_menu_action(self, group: MessageGroup, selected_action, actions: dict) -> None:
+        """Handle whichever action _build_group_context_menu's menu.exec() returned."""
+        if selected_action is None:
+            return
+        if selected_action is actions.get("view_titles"):
             self._open_group_messages_dialog(group)
-        elif selected_action is mark_read_action:
+        elif selected_action is actions.get("mark_read"):
             self._mark_group_as_read_for_group(group)
-        elif selected_action is delete_action:
+        elif selected_action is actions.get("delete"):
             self._delete_group_for_group(group)
-        elif selected_action is block_action:
+        elif selected_action is actions.get("block"):
             self._block_sender_for_group(group)
-        elif self.sender_categorization and selected_action is high_impact_action:
+        elif self.sender_categorization and selected_action is actions.get("high_impact"):
             self.sender_categorization.set_sender_exception(group.sender_email, ImpactLevel.HIGH_IMPACT)
             self._update_message_list()
-        elif self.sender_categorization and selected_action is low_impact_action:
+        elif self.sender_categorization and selected_action is actions.get("low_impact"):
             self.sender_categorization.set_sender_exception(group.sender_email, ImpactLevel.LOW_IMPACT)
             self._update_message_list()
-        elif self.sender_categorization and selected_action is clear_impact_action:
+        elif self.sender_categorization and selected_action is actions.get("clear_impact"):
             self.sender_categorization.clear_sender_exception(group.sender_email)
             self._infer_store_current_groups()
 
@@ -1176,6 +1231,13 @@ class MainWindow(SmartMainWindow):
                 return False
 
         self.current_groups = [g for g in self.current_groups if g is not group]
+        # Keep _sender_groups (the real per-sender groups categorization
+        # always runs against -- see merge_groups_by_domain()'s docstring)
+        # in sync too. group.sender_emails is every real address this
+        # deletion covers -- just the one address in the normal case, or
+        # every sender a domain-merged group represented.
+        deleted_senders = set(group.sender_emails)
+        self._sender_groups = [g for g in self._sender_groups if g.sender_email not in deleted_senders]
         if was_selected_group:
             self.current_group_index = None
             self.current_message_index = 0
@@ -1208,17 +1270,21 @@ class MainWindow(SmartMainWindow):
 
     def _delete_group_for_group(self, group: MessageGroup):
         """Delete all messages in a specific group."""
+        if len(group.sender_emails) > 1:
+            source_desc = f"{len(group.sender_emails)} senders at {group.sender_domain}"
+        else:
+            source_desc = group.sender_email
         reply = QMessageBox.question(
             self,
             "Delete All",
-            f"Delete all {group.count} message(s) from {group.sender_email}?",
+            f"Delete all {group.count} message(s) from {source_desc}?",
             QMessageBox.Yes | QMessageBox.No
         )
         if reply != QMessageBox.Yes:
             return
 
         if self._do_delete_group(group):
-            self.statusBar.showMessage(f"Deleted all messages from {group.sender_email}")
+            self.statusBar.showMessage(f"Deleted all messages from {source_desc}")
         else:
             self.statusBar.showMessage(f"Some messages could not be deleted")
 
@@ -1231,43 +1297,70 @@ class MainWindow(SmartMainWindow):
         self._block_sender_for_group(group)
 
     def _block_sender_for_group(self, group: MessageGroup):
-        """Block a sender for a specific group and delete grouped messages."""
-        sender = group.sender_email
+        """Block every sender in a group and delete grouped messages.
+
+        For an ordinary single-sender group (group.sender_emails is always
+        a 1-tuple there), this is byte-for-byte the same confirmation text
+        and behavior as before this method learned about multi-sender
+        domain groups. Block is the one group action that's genuinely
+        sender-specific -- Mark-as-Read/Delete already operate on messages
+        grouped by provider regardless of how many distinct senders are in
+        the group, so they needed no changes at all for domain groups.
+        """
+        senders = group.sender_emails
 
         if not self.server:
             QMessageBox.warning(self, "Error", "Server is not available.")
             return
 
-        reply = QMessageBox.question(
-            self,
-            "Block Sender",
-            f"Block {sender} and delete all their messages?",
-            QMessageBox.Yes | QMessageBox.No
-        )
+        if len(senders) > 1:
+            sender_list = "\n".join(senders)
+            reply = QMessageBox.question(
+                self,
+                "Block Multiple Senders",
+                f"This domain group contains {len(senders)} distinct senders:\n\n{sender_list}\n\n"
+                f"Block all {len(senders)} senders and delete all {group.count} message(s)?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+        else:
+            reply = QMessageBox.question(
+                self,
+                "Block Sender",
+                f"Block {senders[0]} and delete all their messages?",
+                QMessageBox.Yes | QMessageBox.No
+            )
         if reply != QMessageBox.Yes:
             return
 
-        display_name = group.display_name
-        subjects = [m.subject for m in group.messages]
-        sender_details = {
-            sender: {'display_name': display_name, 'subjects': subjects, 'message_count': group.count},
-        }
-
-        # server.block_senders() always locally suppresses `sender` and
+        # server.block_senders() always locally suppresses each sender and
         # records an audit event, then best-effort creates a durable,
         # provider-side block too (a Microsoft Graph inbox rule or Gmail
         # filter).
         by_provider: dict = {}
         for message in group.messages:
             by_provider.setdefault(message.provider, []).append(message)
+
         for provider_name, messages in by_provider.items():
             auth_prov = self._get_auth_provider_for_message(messages[0])
             if not auth_prov:
                 continue
-            self.server.block_senders(auth_prov.user_id, provider_name, [sender], source="desktop_email_client", sender_details=sender_details)
+            provider_senders = sorted({extract_sender_email(m.sender) for m in messages})
+            sender_details = {}
+            for addr in provider_senders:
+                addr_messages = [m for m in messages if extract_sender_email(m.sender) == addr]
+                display_name, _ = parseaddr(addr_messages[0].sender)
+                sender_details[addr] = {
+                    'display_name': display_name or addr,
+                    'subjects': [m.subject for m in addr_messages],
+                    'message_count': len(addr_messages),
+                }
+            self.server.block_senders(auth_prov.user_id, provider_name, provider_senders, source="desktop_email_client", sender_details=sender_details)
 
         self._do_delete_group(group)
-        self.statusBar.showMessage(f"Blocked {sender} and deleted their messages")
+        if len(senders) > 1:
+            self.statusBar.showMessage(f"Blocked {len(senders)} senders and deleted their messages")
+        else:
+            self.statusBar.showMessage(f"Blocked {senders[0]} and deleted their messages")
 
     def _delete_message(self):
         """Delete selected message"""
@@ -1318,7 +1411,21 @@ class MainWindow(SmartMainWindow):
                 
                 # Remove from all messages list
                 self.current_messages = [m for m in self.current_messages if m.id != message.id]
-                
+
+                # Keep _sender_groups (the real per-sender groups
+                # categorization always runs against) in sync too -- unlike
+                # _do_delete_group, this only removes one message, from
+                # whichever real sender it actually belongs to (not
+                # necessarily group.sender_email, which is a domain string
+                # when the displayed group is domain-merged).
+                actual_sender = extract_sender_email(message.sender)
+                for i, sender_group in enumerate(self._sender_groups):
+                    if sender_group.sender_email == actual_sender:
+                        sender_group.messages = [m for m in sender_group.messages if m.id != message.id]
+                        if not sender_group.messages:
+                            self._sender_groups.pop(i)
+                        break
+
                 self._update_message_list()
                 
                 # Update display
@@ -1470,6 +1577,45 @@ class MainWindow(SmartMainWindow):
         self.oldest_first_checkbox.setText(
             "Oldest First (on)" if self.oldest_first_checkbox.isChecked() else "Oldest First"
         )
+        self.group_by_domain_checkbox.setText(
+            "Group by Domain (on)" if self.group_by_domain_checkbox.isChecked() else "Group by Domain"
+        )
+
+    def _rebuild_current_groups(self) -> None:
+        """Recompute self.current_groups from self._sender_groups (always
+        the real per-sender grouping), applying "Group by Domain" if
+        active. Categorization/inference always runs against
+        self._sender_groups directly, never against this method's output --
+        see merge_groups_by_domain()'s docstring for why."""
+        if self.group_by_domain_checkbox.isChecked() and self.sender_categorization:
+            self.current_groups = merge_groups_by_domain(
+                self._sender_groups, self.sender_categorization.is_personal_mailbox_domain
+            )
+        else:
+            self.current_groups = self._sender_groups
+
+    def _on_group_by_domain_toggled(self, checked: bool) -> None:
+        self._sync_filter_button_labels()
+        # Group boundaries change entirely between modes -- carrying a
+        # selection over across them isn't meaningful, so reset it the same
+        # way _do_delete_group()/_delete_message() do when a group goes away.
+        self.current_group_index = None
+        self.current_message_index = 0
+        self.message_body.clear()
+        self.subject_label.setText("Select a message group to view")
+        self.metadata_label.clear()
+        self.message_nav_label.setText("No messages")
+        self.first_msg_btn.setEnabled(False)
+        self.prev_msg_btn.setEnabled(False)
+        self.next_msg_btn.setEnabled(False)
+        self.last_msg_btn.setEnabled(False)
+        self.mark_read_btn.setEnabled(False)
+        self.mark_all_read_btn.setEnabled(False)
+        self.delete_all_btn.setEnabled(False)
+        self.block_btn.setEnabled(False)
+        self.delete_btn.setEnabled(False)
+        self._rebuild_current_groups()
+        self._update_message_list()
 
     def _on_oldest_first_toggled(self, checked: bool) -> None:
         self._sync_filter_button_labels()
@@ -1492,8 +1638,10 @@ class MainWindow(SmartMainWindow):
         self._update_message_list()
 
     def _infer_store_current_groups(self) -> None:
-        if self.sender_categorization and self.current_groups:
-            self.sender_categorization.infer_and_store_groups(self.current_groups)
+        # Always the real per-sender groups -- never current_groups directly,
+        # which may be domain-merged (see _rebuild_current_groups).
+        if self.sender_categorization and self._sender_groups:
+            self.sender_categorization.infer_and_store_groups(self._sender_groups)
         self._update_message_list()
 
     def _rebuild_inferred_categories(self) -> bool:
@@ -1503,7 +1651,7 @@ class MainWindow(SmartMainWindow):
         """
         if not self.sender_categorization:
             return False
-        if not self.current_groups:
+        if not self._sender_groups:
             reply = QMessageBox.question(
                 self,
                 "Rebuild inference",
@@ -1520,7 +1668,10 @@ class MainWindow(SmartMainWindow):
             self._update_message_list()
             return True
         self.sender_categorization.clear_all_inferred_categories()
-        self.sender_categorization.infer_and_store_groups(self.current_groups)
+        # Always the real per-sender groups -- see merge_groups_by_domain()'s
+        # docstring for why current_groups (possibly domain-merged) must
+        # never be passed to infer_and_store_groups().
+        self.sender_categorization.infer_and_store_groups(self._sender_groups)
         self.statusBar.showMessage("Rebuilt sender inference from loaded message groups.", 8000)
         self._update_message_list()
         return True

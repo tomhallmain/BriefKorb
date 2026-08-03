@@ -117,3 +117,17 @@ def window(qtbot, monkeypatch, isolated_app_state):
     body_thread = getattr(win, "body_worker_thread", None)
     if body_thread is not None:
         qtbot.waitUntil(lambda: not body_thread.isRunning(), timeout=2000)
+
+
+@pytest.fixture
+def window_with_categorization(window):
+    """The `window` fixture above stubs _load_config() to a no-op, so
+    window.sender_categorization is normally None -- several features
+    (low-impact senders, domain groups) are entirely gated on it, so their
+    tests need a real manager wired in. storage_path is ignored in favor of
+    BRIEFKORB_CACHE_DIR (set by the autouse isolated_app_state fixture),
+    same as tests/unit/test_sender_categorization_inference.py's convention.
+    """
+    from email_client.utils.sender_categorization import SenderCategorizationManager
+    window.sender_categorization = SenderCategorizationManager(storage_path="ignored")
+    return window

@@ -1,8 +1,7 @@
 """Tests for GroupMessagesDialog, covering docs/code-briefkorb-tasks-*.tsv's
 "Grouped message titles and info view mode" item: view every message's
 title/sender/date in a group without loading any message body, plus quick
-group-level actions mirroring the existing right-click context menu (see
-docs/grouped-message-titles-dialog-spec.md for the design this implements).
+group-level actions mirroring the existing right-click context menu.
 
 Constructs GroupMessagesDialog directly with spy callbacks rather than via
 MainWindow._open_group_messages_dialog()/dialog.exec() -- exec() blocks on

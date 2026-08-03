@@ -15,7 +15,10 @@ from email_client.utils.sender_categorization import (
     ImpactLevel,
     SenderCategorizationManager,
 )
-from email_client.utils.sender_categorization_rules import load_sender_categorization_rules
+from email_client.utils.sender_categorization_rules import (
+    SenderCategorizationRules,
+    load_sender_categorization_rules,
+)
 from email_server import EmailMessage
 
 
@@ -252,3 +255,105 @@ def test_rules_path_uses_only_that_json_not_encrypted_defaults(tmp_path: Path) -
     rules = load_sender_categorization_rules(rules_path=path)
     assert rules.bulk_domain_markers == ("unique-bulk-test.example",)
     assert rules.high_security_markers == ()
+
+
+# --- Domain groups: multi-sender group classification -------------------------
+#
+# is_high_impact_group/is_low_impact_group/is_suspected_bot_spam_group all key
+# off group.sender_emails now (a 1-tuple for an ordinary single-sender group,
+# several real addresses for a domain-merged group -- see
+# message_grouping.merge_groups_by_domain). any()-for-high-impact,
+# all()-for-low-impact/spam is deliberately asymmetric: a domain group
+# shouldn't get hidden from "High-Impact Only" just because it also contains
+# less-important senders, but shouldn't get hidden *by default* unless every
+# sender in it agrees it's low-value.
+
+def _group(sender_emails: list, domain: str = "acme.com") -> MessageGroup:
+    dummy_message = EmailMessage(
+        id="m1", subject="Hi", sender=f"Test <{sender_emails[0]}>",
+        recipients=["me@example.com"], received_date=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        body="", is_read=False, provider="microsoft",
+    )
+    return MessageGroup(
+        sender_email=domain if len(sender_emails) > 1 else sender_emails[0],
+        sender_domain=domain,
+        messages=[dummy_message],
+        sender_emails=tuple(sender_emails),
+    )
+
+
+def test_is_high_impact_group_true_if_any_sender_high_impact(fake_cache: FakeCache) -> None:
+    manager = SenderCategorizationManager(storage_path="ignored")
+    manager.set_sender_exception("a@acme.com", ImpactLevel.HIGH_IMPACT)
+    manager.set_sender_exception("b@acme.com", ImpactLevel.LOW_IMPACT)
+
+    assert manager.is_high_impact_group(_group(["a@acme.com", "b@acme.com"])) is True
+
+
+def test_is_high_impact_group_false_if_no_sender_high_impact(fake_cache: FakeCache) -> None:
+    manager = SenderCategorizationManager(storage_path="ignored")
+    manager.set_sender_exception("a@acme.com", ImpactLevel.LOW_IMPACT)
+
+    assert manager.is_high_impact_group(_group(["a@acme.com", "b@acme.com"])) is False
+
+
+def test_is_low_impact_group_requires_all_senders_low_impact(fake_cache: FakeCache) -> None:
+    manager = SenderCategorizationManager(storage_path="ignored")
+    manager.set_sender_exception("a@acme.com", ImpactLevel.LOW_IMPACT)
+    manager.set_sender_exception("b@acme.com", ImpactLevel.HIGH_IMPACT)
+
+    assert manager.is_low_impact_group(_group(["a@acme.com", "b@acme.com"])) is False
+
+
+def test_is_low_impact_group_true_if_all_senders_low_impact(fake_cache: FakeCache) -> None:
+    manager = SenderCategorizationManager(storage_path="ignored")
+    manager.set_sender_exception("a@acme.com", ImpactLevel.LOW_IMPACT)
+    manager.set_sender_exception("b@acme.com", ImpactLevel.LOW_IMPACT)
+
+    assert manager.is_low_impact_group(_group(["a@acme.com", "b@acme.com"])) is True
+
+
+def test_single_sender_group_semantics_match_pre_domain_groups_behavior(fake_cache: FakeCache) -> None:
+    """sender_emails defaults to a 1-tuple for an ordinary group (see
+    MessageGroup.__post_init__), so any()/all() over one element reduces to
+    exactly the old sender_email-only check -- no regression for the
+    non-domain-merged case."""
+    manager = SenderCategorizationManager(storage_path="ignored")
+    manager.set_sender_exception("solo@acme.com", ImpactLevel.HIGH_IMPACT)
+
+    assert manager.is_high_impact_group(_group(["solo@acme.com"])) is True
+    assert manager.is_low_impact_group(_group(["solo@acme.com"])) is False
+
+
+def test_is_suspected_bot_spam_group_requires_all_senders_flagged(fake_cache: FakeCache) -> None:
+    manager = SenderCategorizationManager(storage_path="ignored")
+    fake_cache.data[SenderCategorizationManager.SENDERS_KEY] = {
+        "a@acme.com": {"impact": ImpactLevel.LOW_IMPACT.value, "decision_trace": ["decision:bot_spam_low"]},
+        "b@acme.com": {"impact": ImpactLevel.LOW_IMPACT.value, "decision_trace": ["decision:generic_low"]},
+    }
+
+    assert manager.is_suspected_bot_spam_group(_group(["a@acme.com", "b@acme.com"])) is False
+
+
+def test_is_suspected_bot_spam_group_true_if_all_senders_flagged(fake_cache: FakeCache) -> None:
+    manager = SenderCategorizationManager(storage_path="ignored")
+    fake_cache.data[SenderCategorizationManager.SENDERS_KEY] = {
+        "a@acme.com": {"impact": ImpactLevel.LOW_IMPACT.value, "decision_trace": ["decision:bot_spam_low"]},
+        "b@acme.com": {"impact": ImpactLevel.LOW_IMPACT.value, "decision_trace": ["decision:bot_spam_low"]},
+    }
+
+    assert manager.is_suspected_bot_spam_group(_group(["a@acme.com", "b@acme.com"])) is True
+
+
+def test_is_personal_mailbox_domain(fake_cache: FakeCache) -> None:
+    rules = SenderCategorizationRules(
+        bulk_domain_markers=(), bulk_subject_markers=(), high_security_markers=(),
+        financial_inclusion_markers=(), personal_mailbox_domains=("gmail.com", "yahoo.com"),
+        automation_local_markers=(), promotional_local_markers=(),
+        low_impact_domain_parts=(), low_impact_subject_terms=(),
+    )
+    manager = SenderCategorizationManager(storage_path="ignored", rules=rules)
+
+    assert manager.is_personal_mailbox_domain("gmail.com") is True
+    assert manager.is_personal_mailbox_domain("GMAIL.COM") is True
+    assert manager.is_personal_mailbox_domain("acme.com") is False
