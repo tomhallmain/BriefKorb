@@ -268,13 +268,13 @@ def test_messages_view_post_context_delete_message(client: Client, tmp_path: Pat
     assert fake_server.delete_user_messages_calls == [{'user_id': 'user1', 'provider_name': 'microsoft', 'message_ids': ['m1']}]
 
 
-def test_messages_view_post_context_delete_and_block_reports_warning_when_block_unsupported(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Covers a Gmail sender selected for deleteMessageBlockSender, where
-    block_senders() always reports False for the durable-rule result (see
-    GmailProvider.block_senders) -- delete still succeeds, and (per
-    UnifiedEmailServer.block_senders()) the sender is still locally
-    suppressed even though False is returned here; that part is exercised
-    in test_unified_email_server.py, not through this fake."""
+def test_messages_view_post_context_delete_and_block_reports_warning_when_durable_rule_fails(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Covers deleteMessageBlockSender when block_senders() reports False
+    for the durable-rule result (quota, API error, etc.) -- delete still
+    succeeds, and (per UnifiedEmailServer.block_senders()) the sender is
+    still locally suppressed even though False is returned here; that
+    part is exercised in test_unified_email_server.py, not through this
+    fake."""
     _write_config(tmp_path, gmail_enabled=True)
     _patch_sender_categorization(monkeypatch)
     fake_server = FakeUnifiedEmailServer(

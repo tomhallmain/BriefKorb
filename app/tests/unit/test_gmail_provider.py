@@ -76,14 +76,38 @@ class FakeMessagesResource:
 
 
 @dataclass
+class FakeFiltersResource:
+    create_calls: List[Dict[str, Any]] = field(default_factory=list)
+    fail_for: List[str] = field(default_factory=list)
+
+    def create(self, userId: str, body: Dict[str, Any]) -> _Execable:
+        self.create_calls.append({'userId': userId, 'body': body})
+        if body['criteria']['from'] in self.fail_for:
+            raise RuntimeError('quota exceeded')
+        return _Execable({'id': f"filter-{body['criteria']['from']}"})
+
+
+@dataclass
+class FakeSettingsResource:
+    filters_resource: FakeFiltersResource
+
+    def filters(self) -> FakeFiltersResource:
+        return self.filters_resource
+
+
+@dataclass
 class FakeGmailService:
     messages_resource: FakeMessagesResource
+    settings_resource: Optional[FakeSettingsResource] = None
 
     def users(self) -> 'FakeGmailService':
         return self
 
     def messages(self) -> FakeMessagesResource:
         return self.messages_resource
+
+    def settings(self) -> FakeSettingsResource:
+        return self.settings_resource
 
 
 def _gmail_message(
@@ -138,12 +162,25 @@ class _ExplodingMessagesResource:
         raise RuntimeError('api down')
 
 
+class _ExplodingFiltersResource:
+    def create(self, **kwargs: Any) -> Any:
+        raise RuntimeError('api down')
+
+
+class _ExplodingSettingsResource:
+    def filters(self) -> _ExplodingFiltersResource:
+        return _ExplodingFiltersResource()
+
+
 class _ExplodingService:
     def users(self) -> '_ExplodingService':
         return self
 
     def messages(self) -> _ExplodingMessagesResource:
         return _ExplodingMessagesResource()
+
+    def settings(self) -> _ExplodingSettingsResource:
+        return _ExplodingSettingsResource()
 
 
 # --- __init__ ----------------------------------------------------------------
@@ -490,17 +527,45 @@ def test_delete_messages_returns_false_on_api_exception(tmp_path: Path) -> None:
 
 # --- block_senders --------------------------------------------------------------
 
-def test_block_senders_always_returns_empty_list(tmp_path: Path) -> None:
-    """Gmail has no equivalent to Microsoft Graph's inbox-rule mechanism in
-    this codebase -- confirmed unsupported, not a stand-in for "not
-    implemented yet". UnifiedEmailServer.block_senders() still locally
-    suppresses these senders regardless (see test_unified_email_server.py)."""
-    provider = _provider(tmp_path)
-
-    assert provider.block_senders('user1', ['Alice', 'Bob']) == []
-
-
 def test_block_senders_returns_empty_list_for_empty_input(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
 
     assert provider.block_senders('user1', []) == []
+
+
+def test_block_senders_returns_empty_list_when_not_authenticated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider(tmp_path)
+    monkeypatch.setattr(provider, 'authenticate', lambda user_id: False)
+
+    assert provider.block_senders('user1', ['a@example.com']) == []
+
+
+def test_block_senders_creates_a_trash_filter_per_sender(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    filters = FakeFiltersResource()
+    provider._service = FakeGmailService(FakeMessagesResource(), FakeSettingsResource(filters))
+
+    result = provider.block_senders('user1', ['a@example.com', 'b@example.com'])
+
+    assert sorted(result) == ['a@example.com', 'b@example.com']
+    assert [c['body']['criteria'] for c in filters.create_calls] == [
+        {'from': 'a@example.com'}, {'from': 'b@example.com'},
+    ]
+    assert all(c['body']['action'] == {'addLabelIds': ['TRASH'], 'removeLabelIds': ['INBOX', 'UNREAD']} for c in filters.create_calls)
+
+
+def test_block_senders_returns_only_successful_senders_on_partial_failure(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    filters = FakeFiltersResource(fail_for=['bad@example.com'])
+    provider._service = FakeGmailService(FakeMessagesResource(), FakeSettingsResource(filters))
+
+    result = provider.block_senders('user1', ['good@example.com', 'bad@example.com'])
+
+    assert result == ['good@example.com']
+
+
+def test_block_senders_returns_empty_list_on_api_exception(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    provider._service = _ExplodingService()
+
+    assert provider.block_senders('user1', ['a@example.com']) == []

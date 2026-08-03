@@ -17,11 +17,14 @@ logger = setup_logger('email_server.auth.gmail')
 class GmailOAuth(OAuthProvider):
     """Gmail OAuth implementation"""
     
-    # Gmail API scopes
+    # Gmail API scopes. gmail.settings.basic is for filter management
+    # (GmailProvider.block_senders) -- users authenticated before it was
+    # added need to re-consent before blocking will work for them.
     SCOPES = [
         'https://www.googleapis.com/auth/gmail.readonly',
         'https://www.googleapis.com/auth/gmail.send',
-        'https://www.googleapis.com/auth/gmail.modify'
+        'https://www.googleapis.com/auth/gmail.modify',
+        'https://www.googleapis.com/auth/gmail.settings.basic'
     ]
     
     def __init__(self, credentials_path: str, redirect_uri: str, token_manager: Optional[TokenManager] = None):

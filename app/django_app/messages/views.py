@@ -44,9 +44,8 @@ def _resolve_selected_buckets(
 def _perform_bulk_action(request, server: UnifiedEmailServer, action: str, selected_buckets: List[Dict[str, Any]]) -> None:
     """Perform markAsRead/deleteMessage/deleteMessageBlockSender across
     however many providers the selected buckets span, and flash a summary
-    message. One provider's block_senders() failing (e.g. Gmail, which has
-    no server-side blocking capability -- see EmailProvider.block_senders)
-    doesn't stop the other providers' actions from running.
+    message. One provider's block_senders() failing doesn't stop the other
+    providers' actions from running.
     """
     if not selected_buckets:
         django_messages.error(request, "No matching messages found for the selected sender(s).")

@@ -709,6 +709,32 @@ def mgr_two_postings(mgr: EntityGraphManager) -> EntityGraphManager:
     return mgr
 
 
+@pytest.fixture
+def mgr_two_postings_aged(mgr: EntityGraphManager) -> EntityGraphManager:
+    """Same two postings as mgr_two_postings, but backdated a day so aging
+    with ttl_active_days=0 doesn't race age_postings()'s own now()-based
+    cutoff against received_date=now() -- same idea as TestAgePostings'
+    _aged_msg helper."""
+    msgs = [
+        _msg(
+            msg_id="msg-001",
+            subject="We're hiring a Backend Engineer",
+            sender="Acme Careers <jobs@acme.com>",
+            body=_job_body(company="Acme Corp", title="Backend Engineer", location="Remote"),
+            received_date=datetime.now(timezone.utc) - timedelta(days=1),
+        ),
+        _msg(
+            msg_id="msg-002",
+            subject="Join us as a Data Scientist",
+            sender="Beta Talent <talent@beta.io>",
+            body=_job_body(company="Beta Inc", title="Data Scientist", location="New York"),
+            received_date=datetime.now(timezone.utc) - timedelta(days=1),
+        ),
+    ]
+    mgr.process_messages(msgs)
+    return mgr
+
+
 class TestQueries:
     def test_query_all_postings(self, mgr_two_postings):
         assert len(mgr_two_postings.query_job_postings()) == 2
@@ -741,9 +767,9 @@ class TestQueries:
         assert orgs["Acme Corp"]["active_count"] == 1
         assert orgs["Acme Corp"]["total_count"] == 1
 
-    def test_query_orgs_counts_across_stages(self, mgr_two_postings):
-        mgr_two_postings.age_postings(ttl_active_days=0, ttl_historical_days=999, ttl_archival_days=9999)
-        orgs = {o["name"]: o for o in mgr_two_postings.query_orgs()}
+    def test_query_orgs_counts_across_stages(self, mgr_two_postings_aged):
+        mgr_two_postings_aged.age_postings(ttl_active_days=0, ttl_historical_days=999, ttl_archival_days=9999)
+        orgs = {o["name"]: o for o in mgr_two_postings_aged.query_orgs()}
         assert orgs["Acme Corp"]["historical_count"] == 1
         assert orgs["Acme Corp"]["active_count"] == 0
         assert orgs["Acme Corp"]["total_count"] == 1

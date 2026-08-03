@@ -1078,18 +1078,17 @@ def test_block_senders_passes_through_sender_details_to_recorded_event(
     assert event['message_count'] == 3
 
 
-def test_block_senders_returns_false_for_gmail_since_it_is_unsupported_but_still_locally_suppresses(
+def test_block_senders_still_locally_suppresses_when_gmail_durable_rule_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Not a dispatch-layer test of GmailProvider's own behavior (that's
-    test_gmail_provider.py's job) -- just confirms UnifiedEmailServer
-    surfaces "unsupported" the same way as any other durable-rule failure
-    (return False), while still locally suppressing and recording an
-    audit event -- Gmail has no durable server-side block, but that
-    shouldn't mean blocking a Gmail sender does nothing at all."""
+    """Not a dispatch-layer test of GmailProvider's own API-calling
+    behavior (that's test_gmail_provider.py's job) -- confirms
+    UnifiedEmailServer treats a Gmail durable-rule failure the same as any
+    other provider's: local suppression and recording still happen."""
     server = _server(tmp_path, microsoft=False, gmail=True)
     provider = server.get_provider('gmail')
     monkeypatch.setattr(provider, 'authenticate', lambda user_id: True)
+    monkeypatch.setattr(provider, 'block_senders', lambda user_id, sender_names: [])
 
     result = server.block_senders('user1', 'gmail', ['alice@example.com'])
 

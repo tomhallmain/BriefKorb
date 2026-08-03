@@ -291,12 +291,33 @@ class GmailProvider(EmailProvider):
             return False
 
     def block_senders(self, user_id: str, sender_names: List[str]) -> List[str]:
-        """Gmail has no equivalent to Microsoft Graph's inbox-rule
-        mechanism in this codebase -- there is no server-side way here to
-        auto-delete a sender's future mail via the Gmail API. Always
-        returns `[]` so callers can treat "not supported" the same as
-        "every sender failed" without needing to special-case providers.
-        UnifiedEmailServer.block_senders() still locally suppresses these
-        senders regardless of this return value."""
-        logger.info(f"block_senders is not supported for the Gmail provider (user {user_id})")
-        return [] 
+        """Create a Gmail filter per sender that auto-trashes their future
+        mail -- the Gmail-API equivalent of MicrosoftGraphProvider's inbox
+        rule. Returns the subset of `sender_names` a filter was actually
+        created for.
+        """
+        if not sender_names:
+            return []
+
+        if not self._service:
+            if not self.authenticate(user_id):
+                logger.error(f"Failed to authenticate user {user_id} for blocking senders")
+                return []
+
+        successful_senders: List[str] = []
+        for sender_name in sender_names:
+            filter_body = {
+                'criteria': {'from': sender_name},
+                'action': {'addLabelIds': ['TRASH'], 'removeLabelIds': ['INBOX', 'UNREAD']},
+            }
+            try:
+                self._service.users().settings().filters().create(userId='me', body=filter_body).execute()
+                successful_senders.append(sender_name)
+            except Exception as e:
+                logger.warning(f"Failed to create block filter for {sender_name}: {str(e)}")
+
+        if len(successful_senders) == len(sender_names):
+            logger.info(f"Successfully created block filters for {len(sender_names)} sender(s) for user {user_id}")
+        else:
+            logger.warning(f"Created block filters for {len(successful_senders)}/{len(sender_names)} sender(s) for user {user_id}")
+        return successful_senders 

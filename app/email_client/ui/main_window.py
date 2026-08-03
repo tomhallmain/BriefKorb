@@ -1120,8 +1120,8 @@ class MainWindow(SmartMainWindow):
 
         # server.block_senders() always locally suppresses `sender` and
         # records an audit event, then best-effort creates a durable,
-        # provider-side block where the provider supports it (e.g. a
-        # Microsoft Graph inbox rule) -- Gmail never does, that's fine.
+        # provider-side block too (a Microsoft Graph inbox rule or Gmail
+        # filter).
         by_provider: dict = {}
         for message in group.messages:
             by_provider.setdefault(message.provider, []).append(message)

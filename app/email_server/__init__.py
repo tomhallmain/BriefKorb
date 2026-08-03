@@ -682,28 +682,21 @@ class UnifiedEmailServer:
         source: str = 'api',
         sender_details: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> bool:
-        """Block the given senders for a user using the specified provider.
+        """Block the given senders using the specified provider -- the
+        single place blocking is handled. Always locally suppresses every
+        sender and records one BlockEvent each; best-effort also creates a
+        durable provider-side rule on top (a Graph inbox rule or Gmail
+        filter -- see EmailProvider.block_senders). Callers must not
+        duplicate suppression or recording themselves.
 
-        The single place blocking is handled: once the provider is reached
-        and authenticated, this always locally suppresses every sender
-        (SenderBlocklist, filtered by get_user_messages() regardless of
-        provider) and records one BlockEvent per sender for the audit
-        trail, then best-effort asks the provider for a durable rule on
-        top (not every provider supports one -- see
-        EmailProvider.block_senders; Gmail never does). Callers must not
-        duplicate local suppression or event recording themselves.
+        Returns True only if every sender got a durable rule. False can
+        still mean suppression + recording happened (no/partial durable
+        rule) -- the only true no-op is an unreachable/unauthenticated
+        provider.
 
-        Returns True only if every sender got a durable provider-side
-        rule. False -- including "provider not found/unauthenticated/
-        unsupported" -- means "no durable rule", not "nothing happened":
-        local suppression and recording still occurred once the provider
-        was reached; an unreachable/unauthenticated provider is the one
-        hard-failure case with no side effects.
-
-        `source` tags the audit trail (e.g. 'django_web_messages',
-        'desktop_email_client'); `sender_details`, keyed by the exact
-        strings in `sender_names`, optionally supplies `{'display_name',
-        'subjects', 'message_count'}` per sender for richer audit context.
+        `source` tags the audit trail; `sender_details` (keyed by
+        `sender_names`) optionally supplies `{'display_name', 'subjects',
+        'message_count'}` per sender for audit context.
         """
         provider = self.get_provider(provider_name)
         if not provider:
@@ -755,7 +748,13 @@ class UnifiedEmailServer:
         self.blocklist.block(email)
 
     def unblock_sender(self, email: str) -> None:
-        """Remove an address from the local suppression list."""
+        """Remove an address from the local suppression list.
+
+        Local suppression only -- doesn't touch a provider-side rule
+        created by block_senders() (a Graph messageRule or Gmail filter).
+        A block should mean a block; a real provider-side unblock should
+        be built eventually.
+        """
         self.blocklist.unblock(email)
 
     def get_blocked_senders(self) -> Set[str]:
@@ -772,7 +771,13 @@ class UnifiedEmailServer:
         event audit log, each carrying that sender's full event history
         (see group_events_by_sender) plus whether it's currently in the
         local suppression list (is_locally_blocked) -- the one call a
-        blocked-senders viewer needs, in either client."""
+        blocked-senders viewer needs, in either client.
+
+        Audit-log state, not verified live state -- a `provider` field
+        means a rule was created at that time, not that it's still active
+        (e.g. deleted directly in Outlook). Reconcile against live
+        provider state later if that drift matters in practice.
+        """
         summaries = group_events_by_sender(self.get_block_events(sender=sender))
         for summary in summaries:
             summary['is_locally_blocked'] = self.is_sender_blocked(summary['sender'])
