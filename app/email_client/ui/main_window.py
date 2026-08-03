@@ -31,7 +31,7 @@ from ui.low_impact_senders_window import LowImpactSendersWindow
 from email_client.utils.scope_checker import ScopeChecker
 from email_client.utils.message_grouping import MessageGroup, group_messages_by_sender
 from email_client.utils.content_type import ContentType
-from email_client.utils.workers import EmailWorkerThread, MessageBodyWorkerThread, EntityExtractionWorkerThread
+from email_client.utils.workers import EmailWorkerThread, MessageBodyWorkerThread, EntityExtractionWorkerThread, DEFAULT_MAX_MESSAGES
 from email_client.utils.html_utils import sanitize_html, convert_plain_text_to_html, is_html_content, strip_images_for_debug
 from email_client.utils.sender_categorization import SenderCategorizationManager, ImpactLevel
 from lib.loading_spinner_qt import LoadingSpinnerBadge
@@ -1095,6 +1095,20 @@ class MainWindow(SmartMainWindow):
         else:
             self.statusBar.showMessage(f"Marked {len(unread)} message(s) as read")
 
+    def _backfill_messages_if_below_limit(self) -> None:
+        """Top the loaded message list back up toward the fetch limit after a
+        delete/block action shrinks it, rather than leaving it permanently
+        smaller than what may still be sitting in the mailbox.
+
+        Reuses the normal refresh path (_load_messages()) -- a full
+        re-fetch naturally pulls in whatever's next in the mailbox up to
+        the same DEFAULT_MAX_MESSAGES cap, so no new provider-side "give me
+        more from this sender" capability is needed here.
+        """
+        if len(self.current_messages) < DEFAULT_MAX_MESSAGES:
+            self.statusBar.showMessage("Backfilling message list...")
+            self._load_messages()
+
     def _do_delete_group(self, group: MessageGroup) -> bool:
         """Delete all messages in a group without prompting. Returns True on full success."""
         if not self.server:
@@ -1151,6 +1165,7 @@ class MainWindow(SmartMainWindow):
             self.delete_all_btn.setEnabled(False)
             self.block_btn.setEnabled(False)
             self.delete_btn.setEnabled(False)
+        self._backfill_messages_if_below_limit()
         return all_succeeded
 
     def _delete_group(self):
@@ -1295,6 +1310,7 @@ class MainWindow(SmartMainWindow):
                     self.delete_btn.setEnabled(False)
                 
                 self.statusBar.showMessage("Message deleted")
+                self._backfill_messages_if_below_limit()
             else:
                 QMessageBox.warning(self, "Error", "Failed to delete message")
         except Exception as e:

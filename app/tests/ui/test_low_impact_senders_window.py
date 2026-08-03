@@ -146,6 +146,11 @@ def test_deleting_low_impact_group_via_window_removes_it_from_both_lists(window_
     # provider so _do_delete_group() takes its normal success path rather
     # than the "no authenticated provider" branch.
     monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *args, **kwargs: QMessageBox.Yes))
+    # _do_delete_group() now also calls _backfill_messages_if_below_limit(),
+    # which would call the real _load_messages() -- unrelated to what this
+    # test checks (delete propagating to both lists), and _FakeServer below
+    # doesn't implement get_authenticated_providers(), so stub it out.
+    monkeypatch.setattr(window, "_load_messages", lambda: None)
 
     class _FakeAuthProvider:
         user_id = "user1"

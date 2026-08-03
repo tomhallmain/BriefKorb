@@ -12,19 +12,25 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from email_server import UnifiedEmailServer, EmailMessage
 from email_client.utils.html_utils import sanitize_html, convert_plain_text_to_html, is_html_content
 
+# The cap every normal load fetches up to. Exposed here (rather than left as
+# a bare literal on EmailWorkerThread) so callers that need to reason about
+# "is the loaded set below the fetch limit" -- e.g. MainWindow backfilling
+# the list after a delete/block shrinks it -- have one place to reference.
+DEFAULT_MAX_MESSAGES = 200
+
 
 class EmailWorkerThread(QThread):
     """Worker thread for fetching emails without blocking UI"""
     messages_loaded = Signal(list)
     error_occurred = Signal(str)
-    
+
     def __init__(self, server: UnifiedEmailServer, provider_name: Optional[str] = None):
         super().__init__()
         self.server = server
         self.provider_name = provider_name  # None means load from all providers
         self.folder = 'inbox'
         self.unread_only = False
-        self.max_messages = 200
+        self.max_messages = DEFAULT_MAX_MESSAGES
     
     def run(self):
         """Fetch messages in background thread"""
