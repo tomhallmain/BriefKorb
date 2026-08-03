@@ -20,7 +20,6 @@ from PySide6.QtGui import QFont, QTextDocument
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from email_server import UnifiedEmailServer, EmailMessage, AuthenticatedProvider
 from email_server.config import EmailServerConfig
-from email_server.blocked_sender_tracking import BlockEvent, MAX_TRACKED_SUBJECTS
 from lib.multi_display_qt import SmartMainWindow
 
 from widgets.message_list_item import MessageListItem
@@ -1113,16 +1112,16 @@ class MainWindow(SmartMainWindow):
         if reply != QMessageBox.Yes:
             return
 
-        self.server.block_sender(sender)
-
         display_name = group.display_name
-        subjects = [m.subject for m in group.messages][:MAX_TRACKED_SUBJECTS]
-        sender_details = {sender: {'display_name': display_name, 'subjects': subjects}}
+        subjects = [m.subject for m in group.messages]
+        sender_details = {
+            sender: {'display_name': display_name, 'subjects': subjects, 'message_count': group.count},
+        }
 
-        # Best-effort: also create a durable, provider-side block where the
-        # provider supports it (e.g. a Microsoft Graph inbox rule). Not every
-        # provider does (Gmail returns False) -- that's fine, the local
-        # suppression list above still covers display filtering either way.
+        # server.block_senders() always locally suppresses `sender` and
+        # records an audit event, then best-effort creates a durable,
+        # provider-side block where the provider supports it (e.g. a
+        # Microsoft Graph inbox rule) -- Gmail never does, that's fine.
         by_provider: dict = {}
         for message in group.messages:
             by_provider.setdefault(message.provider, []).append(message)
@@ -1132,17 +1131,6 @@ class MainWindow(SmartMainWindow):
                 continue
             self.server.block_senders(auth_prov.user_id, provider_name, [sender], source="desktop_email_client", sender_details=sender_details)
 
-        self.server.blocked_sender_tracker.record(
-            BlockEvent(
-                sender=sender,
-                source="desktop_email_client",
-                sender_kind="email",
-                message_count=group.count,
-                sender_domain=group.sender_domain,
-                sender_display_name=display_name,
-                message_subjects=subjects,
-            )
-        )
         self._do_delete_group(group)
         self.statusBar.showMessage(f"Blocked {sender} and deleted their messages")
 

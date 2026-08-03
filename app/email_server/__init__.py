@@ -15,7 +15,7 @@ from .utils.logger import setup_logger
 from .utils.datetime_compat import normalize_received_at_utc
 from .auth import TokenManager
 from .blocklist import SenderBlocklist
-from .blocked_sender_tracking import BlockedSenderTracker, group_events_by_sender
+from .blocked_sender_tracking import BlockedSenderTracker, BlockEvent, MAX_TRACKED_SUBJECTS, group_events_by_sender
 
 # Set up logger
 logger = setup_logger('email_server')
@@ -115,30 +115,21 @@ class EmailProvider(ABC):
         pass
 
     @abstractmethod
-    def block_senders(
-        self,
-        user_id: str,
-        sender_names: List[str],
-        source: str = 'api',
-        sender_details: Optional[Dict[str, Dict[str, Any]]] = None,
-    ) -> bool:
-        """Block future mail from the given senders for a user, where the
-        provider supports it server-side.
+    def block_senders(self, user_id: str, sender_names: List[str]) -> List[str]:
+        """Create a durable, provider-side block for as many of the given
+        senders as possible, where the provider supports it server-side.
+        Returns the subset of `sender_names` for which a durable block was
+        actually created.
 
         Not every provider has an equivalent capability -- a provider
-        without one returns False rather than raising, so callers can
-        treat "not supported" the same as "failed" without special-casing
-        providers themselves.
+        without one returns `[]` rather than raising, so callers can treat
+        "not supported" the same as "every sender failed" without
+        special-casing providers themselves.
 
-        `source` identifies the caller for the block-event audit trail
-        (e.g. 'django_web_messages', 'desktop_email_client') -- it does
-        not affect blocking behavior itself.
-
-        `sender_details`, keyed by the exact strings in `sender_names`,
-        optionally carries `{'display_name': str, 'subjects': List[str]}`
-        per sender -- richer context for the block-event audit trail (see
-        BlockEvent.sender_display_name/message_subjects) beyond just the
-        matching string used to create the block itself.
+        Local suppression and block-event audit recording are handled
+        centrally by UnifiedEmailServer.block_senders(), not here --
+        implementations focus solely on attempting the provider-side block
+        and reporting which senders succeeded.
         """
         pass
 
@@ -691,11 +682,29 @@ class UnifiedEmailServer:
         source: str = 'api',
         sender_details: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> bool:
-        """Block future mail from the given senders for a user using the
-        specified provider, where that provider supports it (see
-        EmailProvider.block_senders -- not every provider has an
-        equivalent capability; an unsupported provider returns False here
-        the same as any other failure)."""
+        """Block the given senders for a user using the specified provider.
+
+        The single place blocking is handled: once the provider is reached
+        and authenticated, this always locally suppresses every sender
+        (SenderBlocklist, filtered by get_user_messages() regardless of
+        provider) and records one BlockEvent per sender for the audit
+        trail, then best-effort asks the provider for a durable rule on
+        top (not every provider supports one -- see
+        EmailProvider.block_senders; Gmail never does). Callers must not
+        duplicate local suppression or event recording themselves.
+
+        Returns True only if every sender got a durable provider-side
+        rule. False -- including "provider not found/unauthenticated/
+        unsupported" -- means "no durable rule", not "nothing happened":
+        local suppression and recording still occurred once the provider
+        was reached; an unreachable/unauthenticated provider is the one
+        hard-failure case with no side effects.
+
+        `source` tags the audit trail (e.g. 'django_web_messages',
+        'desktop_email_client'); `sender_details`, keyed by the exact
+        strings in `sender_names`, optionally supplies `{'display_name',
+        'subjects', 'message_count'}` per sender for richer audit context.
+        """
         provider = self.get_provider(provider_name)
         if not provider:
             logger.error(f"Provider not found: {provider_name}")
@@ -705,12 +714,28 @@ class UnifiedEmailServer:
             logger.warning(f"Authentication failed for user {user_id} with provider {provider_name}")
             return False
 
-        success = provider.block_senders(user_id, sender_names, source=source, sender_details=sender_details)
+        successful_senders = set(provider.block_senders(user_id, sender_names))
 
+        for sender_name in sender_names:
+            self.blocklist.block(sender_name)
+            detail = (sender_details or {}).get(sender_name, {})
+            subjects = (detail.get('subjects') or [])[:MAX_TRACKED_SUBJECTS] or None
+            self.blocked_sender_tracker.record(
+                BlockEvent(
+                    sender=sender_name,
+                    source=source,
+                    provider=provider_name if sender_name in successful_senders else None,
+                    sender_display_name=detail.get('display_name'),
+                    message_subjects=subjects,
+                    message_count=detail.get('message_count'),
+                )
+            )
+
+        success = len(successful_senders) == len(sender_names)
         if success:
             logger.info(f"Successfully blocked {len(sender_names)} sender(s) for user {user_id} with provider {provider_name}")
         else:
-            logger.error(f"Failed to block senders for user {user_id} with provider {provider_name}")
+            logger.error(f"Failed to create durable block rules for all senders for user {user_id} with provider {provider_name} ({len(successful_senders)}/{len(sender_names)} succeeded); local suppression still applied")
 
         return success
 

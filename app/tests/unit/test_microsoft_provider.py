@@ -533,38 +533,27 @@ def test_delete_messages_returns_false_when_all_fail(tmp_path: Path, monkeypatch
 
 # --- block_senders --------------------------------------------------------------
 #
-# block_senders() records a BlockedSenderTracker event per successful rule --
-# the real tracker is AppInfoCache-backed (OS keyring, see
-# test_app_info_cache.py), so every test here replaces
-# provider.blocked_sender_tracker with a simple recording fake rather than
-# letting it touch real encryption.
+# block_senders() only attempts to create a durable Graph inbox rule per
+# sender and reports which ones succeeded -- it does no local suppression
+# or BlockEvent recording itself (that's centralized in
+# UnifiedEmailServer.block_senders(), see test_unified_email_server.py).
 
-class _FakeBlockedSenderTracker:
-    def __init__(self) -> None:
-        self.recorded: List[Any] = []
-
-    def record(self, event: Any) -> None:
-        self.recorded.append(event)
-
-
-def test_block_senders_returns_true_immediately_for_empty_list(tmp_path: Path) -> None:
+def test_block_senders_returns_empty_list_immediately_for_empty_list(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
-    assert provider.block_senders('user1', []) is True
+    assert provider.block_senders('user1', []) == []
 
 
-def test_block_senders_returns_false_when_not_authenticated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_block_senders_returns_empty_list_when_not_authenticated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     provider = _provider(tmp_path)
     monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: None)
 
-    assert provider.block_senders('user1', ['Alice']) is False
+    assert provider.block_senders('user1', ['Alice']) == []
 
 
-def test_block_senders_creates_rule_per_sender_and_records_events_on_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_block_senders_creates_rule_per_sender_and_returns_successful_senders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     provider = _provider(tmp_path)
     monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: {'access_token': 'at'})
     monkeypatch.setattr(microsoft_provider_module.time, 'sleep', lambda s: None)
-    fake_tracker = _FakeBlockedSenderTracker()
-    monkeypatch.setattr(provider, 'blocked_sender_tracker', fake_tracker)
     posted_urls: List[str] = []
 
     def fake_post(url: str, headers: Any = None, json: Any = None) -> _FakeResponse:
@@ -575,64 +564,14 @@ def test_block_senders_creates_rule_per_sender_and_records_events_on_success(tmp
 
     result = provider.block_senders('user1', ['Alice', 'Bob'])
 
-    assert result is True
+    assert sorted(result) == ['Alice', 'Bob']
     assert posted_urls == [f'{provider.base_url}/me/mailFolders/inbox/messageRules'] * 2
-    assert sorted(e.sender for e in fake_tracker.recorded) == ['Alice', 'Bob']
-    assert all(e.provider == 'microsoft' for e in fake_tracker.recorded)
-    assert all(e.source == 'api' for e in fake_tracker.recorded)
 
 
-def test_block_senders_records_events_with_explicit_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_block_senders_returns_only_successful_senders_on_partial_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     provider = _provider(tmp_path)
     monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: {'access_token': 'at'})
     monkeypatch.setattr(microsoft_provider_module.time, 'sleep', lambda s: None)
-    fake_tracker = _FakeBlockedSenderTracker()
-    monkeypatch.setattr(provider, 'blocked_sender_tracker', fake_tracker)
-    monkeypatch.setattr(microsoft_provider_module.requests, 'post', lambda url, headers=None, json=None: _FakeResponse(status_code=201))
-
-    provider.block_senders('user1', ['Alice'], source='desktop_email_client')
-
-    assert [e.source for e in fake_tracker.recorded] == ['desktop_email_client']
-
-
-def test_block_senders_records_display_name_and_subjects_from_sender_details(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    provider = _provider(tmp_path)
-    monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: {'access_token': 'at'})
-    monkeypatch.setattr(microsoft_provider_module.time, 'sleep', lambda s: None)
-    fake_tracker = _FakeBlockedSenderTracker()
-    monkeypatch.setattr(provider, 'blocked_sender_tracker', fake_tracker)
-    monkeypatch.setattr(microsoft_provider_module.requests, 'post', lambda url, headers=None, json=None: _FakeResponse(status_code=201))
-
-    provider.block_senders(
-        'user1', ['Alice'],
-        sender_details={'Alice': {'display_name': 'Alice Spammer', 'subjects': ['Buy now', 'Act fast', 'Extra', 'Extra2', 'Extra3', 'Extra4']}},
-    )
-
-    assert [e.sender_display_name for e in fake_tracker.recorded] == ['Alice Spammer']
-    # Capped to MAX_TRACKED_SUBJECTS (5), even though 6 were supplied.
-    assert [e.message_subjects for e in fake_tracker.recorded] == [['Buy now', 'Act fast', 'Extra', 'Extra2', 'Extra3']]
-
-
-def test_block_senders_leaves_display_name_and_subjects_none_without_sender_details(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    provider = _provider(tmp_path)
-    monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: {'access_token': 'at'})
-    monkeypatch.setattr(microsoft_provider_module.time, 'sleep', lambda s: None)
-    fake_tracker = _FakeBlockedSenderTracker()
-    monkeypatch.setattr(provider, 'blocked_sender_tracker', fake_tracker)
-    monkeypatch.setattr(microsoft_provider_module.requests, 'post', lambda url, headers=None, json=None: _FakeResponse(status_code=201))
-
-    provider.block_senders('user1', ['Alice'])
-
-    assert [e.sender_display_name for e in fake_tracker.recorded] == [None]
-    assert [e.message_subjects for e in fake_tracker.recorded] == [None]
-
-
-def test_block_senders_only_records_successful_senders_and_returns_false_on_partial_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    provider = _provider(tmp_path)
-    monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: {'access_token': 'at'})
-    monkeypatch.setattr(microsoft_provider_module.time, 'sleep', lambda s: None)
-    fake_tracker = _FakeBlockedSenderTracker()
-    monkeypatch.setattr(provider, 'blocked_sender_tracker', fake_tracker)
 
     def fake_post(url: str, headers: Any = None, json: Any = None) -> _FakeResponse:
         sender = json['conditions']['senderContains'][0]
@@ -642,11 +581,10 @@ def test_block_senders_only_records_successful_senders_and_returns_false_on_part
 
     result = provider.block_senders('user1', ['Good', 'Bad'])
 
-    assert result is False
-    assert [e.sender for e in fake_tracker.recorded] == ['Good']
+    assert result == ['Good']
 
 
-def test_block_senders_returns_false_on_unexpected_exception(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_block_senders_returns_empty_list_on_unexpected_exception(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     provider = _provider(tmp_path)
 
     def raise_error(user_id: str) -> Any:
@@ -654,4 +592,4 @@ def test_block_senders_returns_false_on_unexpected_exception(tmp_path: Path, mon
 
     monkeypatch.setattr(provider, '_get_headers', raise_error)
 
-    assert provider.block_senders('user1', ['Alice']) is False
+    assert provider.block_senders('user1', ['Alice']) == []

@@ -269,9 +269,12 @@ def test_messages_view_post_context_delete_message(client: Client, tmp_path: Pat
 
 
 def test_messages_view_post_context_delete_and_block_reports_warning_when_block_unsupported(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Covers the new (post-migration) scenario: a Gmail sender selected
-    for deleteMessageBlockSender, where block_senders() always reports
-    False (see GmailProvider.block_senders) -- delete still succeeds."""
+    """Covers a Gmail sender selected for deleteMessageBlockSender, where
+    block_senders() always reports False for the durable-rule result (see
+    GmailProvider.block_senders) -- delete still succeeds, and (per
+    UnifiedEmailServer.block_senders()) the sender is still locally
+    suppressed even though False is returned here; that part is exercised
+    in test_unified_email_server.py, not through this fake."""
     _write_config(tmp_path, gmail_enabled=True)
     _patch_sender_categorization(monkeypatch)
     fake_server = FakeUnifiedEmailServer(
@@ -287,8 +290,8 @@ def test_messages_view_post_context_delete_and_block_reports_warning_when_block_
 
     assert fake_server.delete_user_messages_calls == [{'user_id': 'user1', 'provider_name': 'gmail', 'message_ids': ['m1']}]
     assert fake_server.block_senders_calls == [{
-        'user_id': 'user1', 'provider_name': 'gmail', 'sender_names': ['Alice'], 'source': 'django_web_messages',
-        'sender_details': {'Alice': {'display_name': 'Alice', 'subjects': ['Hi']}},
+        'user_id': 'user1', 'provider_name': 'gmail', 'sender_names': ['a@example.com'], 'source': 'django_web_messages',
+        'sender_details': {'a@example.com': {'display_name': 'Alice', 'subjects': ['Hi'], 'message_count': 1}},
     }]
     messages_shown = [str(m) for m in response.context['messages']]
     assert any('failed to create some block rules' in m for m in messages_shown)

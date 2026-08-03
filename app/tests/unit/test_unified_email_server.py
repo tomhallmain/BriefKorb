@@ -969,10 +969,19 @@ def test_get_message_delegates_to_provider_when_authenticated(tmp_path: Path, mo
 
 
 # --- block_senders --------------------------------------------------------------
+#
+# UnifiedEmailServer.block_senders() is the single place blocking is
+# handled: local suppression (SenderBlocklist) and BlockEvent recording
+# always happen once a provider is reached and authenticated, regardless
+# of whether that provider can create a durable server-side rule --
+# providers (EmailProvider.block_senders) only report which senders got a
+# durable rule and do no suppression/recording themselves.
 
 def test_block_senders_returns_false_for_unknown_provider(tmp_path: Path) -> None:
     server = _server(tmp_path)
     assert server.block_senders('user1', 'does-not-exist', ['Alice']) is False
+    assert server.is_sender_blocked('Alice') is False
+    assert server.get_block_events() == []
 
 
 def test_block_senders_returns_false_when_authentication_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -981,6 +990,8 @@ def test_block_senders_returns_false_when_authentication_fails(tmp_path: Path, m
     monkeypatch.setattr(provider, 'authenticate', lambda user_id: False)
 
     assert server.block_senders('user1', 'microsoft', ['Alice']) is False
+    assert server.is_sender_blocked('Alice') is False
+    assert server.get_block_events() == []
 
 
 def test_block_senders_delegates_to_provider_when_authenticated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -989,60 +1000,100 @@ def test_block_senders_delegates_to_provider_when_authenticated(tmp_path: Path, 
     monkeypatch.setattr(provider, 'authenticate', lambda user_id: True)
     captured: Dict[str, Any] = {}
 
-    def fake_block_senders(user_id: str, sender_names: List[str], source: str = 'api', sender_details: Any = None) -> bool:
-        captured.update(user_id=user_id, sender_names=sender_names, source=source, sender_details=sender_details)
-        return True
+    def fake_block_senders(user_id: str, sender_names: List[str]) -> List[str]:
+        captured.update(user_id=user_id, sender_names=sender_names)
+        return sender_names
 
     monkeypatch.setattr(provider, 'block_senders', fake_block_senders)
 
     result = server.block_senders('user1', 'microsoft', ['Alice', 'Bob'])
 
     assert result is True
-    assert captured == {'user_id': 'user1', 'sender_names': ['Alice', 'Bob'], 'source': 'api', 'sender_details': None}
+    assert captured == {'user_id': 'user1', 'sender_names': ['Alice', 'Bob']}
 
 
-def test_block_senders_passes_through_explicit_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_block_senders_always_locally_suppresses_every_sender(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Local suppression happens for every sender once the provider is
+    reached, independent of the durable-rule outcome (matters most for
+    partial failures, where only some senders got a durable rule)."""
     server = _server(tmp_path)
     provider = server.get_provider('microsoft')
     monkeypatch.setattr(provider, 'authenticate', lambda user_id: True)
-    captured: Dict[str, Any] = {}
+    monkeypatch.setattr(provider, 'block_senders', lambda user_id, sender_names: ['alice@example.com'])
 
-    def fake_block_senders(user_id: str, sender_names: List[str], source: str = 'api', sender_details: Any = None) -> bool:
-        captured.update(source=source)
-        return True
+    server.block_senders('user1', 'microsoft', ['alice@example.com', 'bob@example.com'])
 
-    monkeypatch.setattr(provider, 'block_senders', fake_block_senders)
-
-    server.block_senders('user1', 'microsoft', ['Alice'], source='desktop_email_client')
-
-    assert captured == {'source': 'desktop_email_client'}
+    assert server.is_sender_blocked('alice@example.com') is True
+    assert server.is_sender_blocked('bob@example.com') is True
 
 
-def test_block_senders_passes_through_sender_details(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_block_senders_records_one_event_per_sender_with_provider_only_for_durable_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     server = _server(tmp_path)
     provider = server.get_provider('microsoft')
     monkeypatch.setattr(provider, 'authenticate', lambda user_id: True)
-    captured: Dict[str, Any] = {}
+    monkeypatch.setattr(provider, 'block_senders', lambda user_id, sender_names: ['alice@example.com'])
 
-    def fake_block_senders(user_id: str, sender_names: List[str], source: str = 'api', sender_details: Any = None) -> bool:
-        captured.update(sender_details=sender_details)
-        return True
+    server.block_senders('user1', 'microsoft', ['alice@example.com', 'bob@example.com'], source='desktop_email_client')
 
-    monkeypatch.setattr(provider, 'block_senders', fake_block_senders)
-    details = {'Alice': {'display_name': 'Alice', 'subjects': ['Hi']}}
-
-    server.block_senders('user1', 'microsoft', ['Alice'], sender_details=details)
-
-    assert captured == {'sender_details': details}
+    events = {e['sender']: e for e in server.get_block_events()}
+    assert set(events) == {'alice@example.com', 'bob@example.com'}
+    assert events['alice@example.com']['provider'] == 'microsoft'
+    assert events['bob@example.com']['provider'] is None
+    assert all(e['source'] == 'desktop_email_client' for e in events.values())
 
 
-def test_block_senders_returns_false_for_gmail_since_it_is_unsupported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_block_senders_records_exactly_one_event_per_sender_no_duplicates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test: blocking used to be recorded both by
+    MicrosoftGraphProvider.block_senders() itself and, on desktop, a second
+    time by the caller -- producing two BlockEvents for one block action.
+    Recording now happens exactly once, here, regardless of caller."""
+    server = _server(tmp_path)
+    provider = server.get_provider('microsoft')
+    monkeypatch.setattr(provider, 'authenticate', lambda user_id: True)
+    monkeypatch.setattr(provider, 'block_senders', lambda user_id, sender_names: sender_names)
+
+    server.block_senders('user1', 'microsoft', ['alice@example.com'])
+
+    assert len(server.get_block_events(sender='alice@example.com')) == 1
+
+
+def test_block_senders_passes_through_sender_details_to_recorded_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = _server(tmp_path)
+    provider = server.get_provider('microsoft')
+    monkeypatch.setattr(provider, 'authenticate', lambda user_id: True)
+    monkeypatch.setattr(provider, 'block_senders', lambda user_id, sender_names: sender_names)
+    details = {'alice@example.com': {'display_name': 'Alice', 'subjects': ['Hi'], 'message_count': 3}}
+
+    server.block_senders('user1', 'microsoft', ['alice@example.com'], sender_details=details)
+
+    [event] = server.get_block_events(sender='alice@example.com')
+    assert event['sender_display_name'] == 'Alice'
+    assert event['message_subjects'] == ['Hi']
+    assert event['message_count'] == 3
+
+
+def test_block_senders_returns_false_for_gmail_since_it_is_unsupported_but_still_locally_suppresses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Not a dispatch-layer test of GmailProvider's own behavior (that's
     test_gmail_provider.py's job) -- just confirms UnifiedEmailServer
-    surfaces "unsupported" the same way as any other failure, with no
-    special-casing needed here."""
+    surfaces "unsupported" the same way as any other durable-rule failure
+    (return False), while still locally suppressing and recording an
+    audit event -- Gmail has no durable server-side block, but that
+    shouldn't mean blocking a Gmail sender does nothing at all."""
     server = _server(tmp_path, microsoft=False, gmail=True)
     provider = server.get_provider('gmail')
     monkeypatch.setattr(provider, 'authenticate', lambda user_id: True)
 
-    assert server.block_senders('user1', 'gmail', ['Alice']) is False
+    result = server.block_senders('user1', 'gmail', ['alice@example.com'])
+
+    assert result is False
+    assert server.is_sender_blocked('alice@example.com') is True
+    [event] = server.get_block_events(sender='alice@example.com')
+    assert event['provider'] is None

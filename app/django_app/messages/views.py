@@ -65,7 +65,6 @@ def _perform_bulk_action(request, server: UnifiedEmailServer, action: str, selec
             continue
         user_id = authenticated[0].user_id
         message_ids = [m['id'] for b in buckets for m in b['messages']]
-        sender_names = [b['fromName'] for b in buckets]
 
         if action == 'markAsRead':
             success = server.mark_messages_as_read(user_id, provider_name, message_ids)
@@ -73,15 +72,21 @@ def _perform_bulk_action(request, server: UnifiedEmailServer, action: str, selec
             success = server.delete_user_messages(user_id, provider_name, message_ids)
         else:  # deleteMessageBlockSender
             delete_success = server.delete_user_messages(user_id, provider_name, message_ids)
+            # Block by the real address (fromAddress), not the display
+            # name (fromName) -- local suppression matches future mail by
+            # parsed email address, so a display name would silently never
+            # match.
+            sender_addresses = [b['fromAddress'] for b in buckets]
             sender_details = {
-                b['fromName']: {
+                b['fromAddress']: {
                     'display_name': b['fromName'],
                     'subjects': [m['subject'] for m in b['messages']][:MAX_TRACKED_SUBJECTS],
+                    'message_count': len(b['messages']),
                 }
                 for b in buckets
             }
             block_success = server.block_senders(
-                user_id, provider_name, sender_names, source='django_web_messages', sender_details=sender_details,
+                user_id, provider_name, sender_addresses, source='django_web_messages', sender_details=sender_details,
             )
             success = delete_success and block_success
             if delete_success and not block_success:

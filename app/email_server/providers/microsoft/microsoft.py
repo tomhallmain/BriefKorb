@@ -2,7 +2,7 @@
 Microsoft Graph API email provider implementation
 """
 
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, List, Optional, Callable
 from datetime import datetime
 import requests
 import html as html_escape
@@ -10,7 +10,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor, wait, Future
 from ...auth import MicrosoftOAuth, TokenManager
 from ... import EmailProvider, EmailMessage
-from ...blocked_sender_tracking import BlockedSenderTracker, BlockEvent, MAX_TRACKED_SUBJECTS
 from ...utils.logger import setup_logger
 
 # Set up logger
@@ -35,8 +34,6 @@ class MicrosoftGraphProvider(EmailProvider):
         logger.debug(f"MicrosoftGraphProvider using TokenManager with storage path: {self.token_manager.storage_path}")
         # Pass token_manager and scopes to avoid creating duplicate
         self.oauth = MicrosoftOAuth(client_id, client_secret, tenant_id, redirect_uri, self.token_manager, scopes=scopes)
-        # Records successful block_senders() rule creations for future auto-block analysis.
-        self.blocked_sender_tracker = BlockedSenderTracker(str(self.token_manager.storage_path))
         logger.info("Initialized Microsoft Graph provider")
     
     def authenticate(self, user_id: str) -> bool:
@@ -357,29 +354,19 @@ class MicrosoftGraphProvider(EmailProvider):
             logger.error(f"Failed to delete messages for user {user_id}: {str(e)}")
             return False
 
-    def block_senders(
-        self,
-        user_id: str,
-        sender_names: List[str],
-        source: str = 'api',
-        sender_details: Optional[Dict[str, Dict[str, Any]]] = None,
-    ) -> bool:
+    def block_senders(self, user_id: str, sender_names: List[str]) -> List[str]:
         """Create inbox rules that auto-delete future mail from each sender,
         with retry logic and parallel processing (same pattern as
-        mark_as_read/delete_messages). Successful rule creations are
-        recorded via BlockedSenderTracker for future auto-block analysis,
-        tagged with `source` (identifies the caller, e.g.
-        'django_web_messages' or 'desktop_email_client') and, where the
-        caller supplied it via `sender_details`, the sender's display name
-        and the message subject(s) that prompted the block -- context for
-        understanding the block's real cause later, not used for matching.
+        mark_as_read/delete_messages). Returns the subset of `sender_names`
+        for which a rule was actually created; UnifiedEmailServer.block_senders()
+        is responsible for local suppression and audit recording, not this
+        method.
         """
         if not sender_names:
-            return True
+            return []
 
         try:
             headers = self._get_headers(user_id)
-            failed_count = 0
 
             def create_block_rule(sender_name: str) -> bool:
                 rule_data = {
@@ -422,30 +409,13 @@ class MicrosoftGraphProvider(EmailProvider):
                 for sender_name, future in sender_futures:
                     if future.result():
                         successful_senders.append(sender_name)
-                    else:
-                        failed_count += 1
 
-            # Persist successful manual block actions for future auto-block models.
-            for sender_name in successful_senders:
-                detail = (sender_details or {}).get(sender_name, {})
-                subjects = detail.get('subjects') or []
-                self.blocked_sender_tracker.record(
-                    BlockEvent(
-                        sender=sender_name,
-                        source=source,
-                        sender_kind='display_name',
-                        provider='microsoft',
-                        mailbox='inbox',
-                        sender_display_name=detail.get('display_name'),
-                        message_subjects=subjects[:MAX_TRACKED_SUBJECTS] or None,
-                    )
-                )
-
+            failed_count = len(sender_names) - len(successful_senders)
             if failed_count == 0:
                 logger.info(f"Successfully created block rules for {len(sender_names)} sender(s) for user {user_id}")
             else:
-                logger.warning(f"Created block rules for {len(sender_names) - failed_count}/{len(sender_names)} sender(s) for user {user_id} ({failed_count} failed)")
-            return failed_count == 0
+                logger.warning(f"Created block rules for {len(successful_senders)}/{len(sender_names)} sender(s) for user {user_id} ({failed_count} failed)")
+            return successful_senders
         except Exception as e:
             logger.error(f"Failed to block senders for user {user_id}: {str(e)}")
-            return False 
+            return [] 

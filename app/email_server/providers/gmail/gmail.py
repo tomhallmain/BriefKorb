@@ -2,7 +2,7 @@
 Gmail API provider implementation
 """
 
-from typing import Any, List, Optional, Union, Dict
+from typing import Dict, List, Optional, Union
 from datetime import datetime, timezone
 import base64
 from email.mime.text import MIMEText
@@ -290,17 +290,13 @@ class GmailProvider(EmailProvider):
             logger.error(f"Failed to delete messages for user {user_id}: {str(e)}")
             return False
 
-    def block_senders(
-        self,
-        user_id: str,
-        sender_names: List[str],
-        source: str = 'api',
-        sender_details: Optional[Dict[str, Dict[str, Any]]] = None,
-    ) -> bool:
+    def block_senders(self, user_id: str, sender_names: List[str]) -> List[str]:
         """Gmail has no equivalent to Microsoft Graph's inbox-rule
         mechanism in this codebase -- there is no server-side way here to
         auto-delete a sender's future mail via the Gmail API. Always
-        returns False so callers can treat "not supported" the same as
-        any other failure without needing to special-case providers."""
+        returns `[]` so callers can treat "not supported" the same as
+        "every sender failed" without needing to special-case providers.
+        UnifiedEmailServer.block_senders() still locally suppresses these
+        senders regardless of this return value."""
         logger.info(f"block_senders is not supported for the Gmail provider (user {user_id})")
-        return False 
+        return [] 

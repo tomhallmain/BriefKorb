@@ -490,22 +490,17 @@ def test_delete_messages_returns_false_on_api_exception(tmp_path: Path) -> None:
 
 # --- block_senders --------------------------------------------------------------
 
-def test_block_senders_always_returns_false(tmp_path: Path) -> None:
+def test_block_senders_always_returns_empty_list(tmp_path: Path) -> None:
     """Gmail has no equivalent to Microsoft Graph's inbox-rule mechanism in
     this codebase -- confirmed unsupported, not a stand-in for "not
-    implemented yet"."""
+    implemented yet". UnifiedEmailServer.block_senders() still locally
+    suppresses these senders regardless (see test_unified_email_server.py)."""
     provider = _provider(tmp_path)
 
-    assert provider.block_senders('user1', ['Alice', 'Bob']) is False
+    assert provider.block_senders('user1', ['Alice', 'Bob']) == []
 
 
-def test_block_senders_always_returns_false_regardless_of_source(tmp_path: Path) -> None:
+def test_block_senders_returns_empty_list_for_empty_input(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
 
-    assert provider.block_senders('user1', ['Alice'], source='desktop_email_client') is False
-
-
-def test_block_senders_accepts_sender_details_and_still_returns_false(tmp_path: Path) -> None:
-    provider = _provider(tmp_path)
-
-    assert provider.block_senders('user1', ['Alice'], sender_details={'Alice': {'display_name': 'Alice', 'subjects': ['Hi']}}) is False
+    assert provider.block_senders('user1', []) == []
