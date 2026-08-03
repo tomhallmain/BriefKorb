@@ -24,6 +24,7 @@ from lib.multi_display_qt import SmartMainWindow
 
 from widgets.message_list_item import MessageListItem
 from widgets.compose_dialog import ComposeDialog
+from widgets.group_messages_dialog import GroupMessagesDialog
 from ui.auth_settings_dialog import AuthSettingsDialog
 from ui.sender_categorization_window import SenderCategorizationWindow
 from ui.blocked_senders_window import BlockedSendersWindow
@@ -781,6 +782,8 @@ class MainWindow(SmartMainWindow):
             return
 
         menu = QMenu(self)
+        view_titles_action = menu.addAction("View Message Titles...")
+        menu.addSeparator()
         mark_read_action = menu.addAction("Mark Group as Read")
         delete_action = menu.addAction("Delete Group")
         block_action = menu.addAction("Block Sender and Delete Group")
@@ -794,7 +797,9 @@ class MainWindow(SmartMainWindow):
             high_impact_action = low_impact_action = clear_impact_action = None
 
         selected_action = menu.exec(self.message_list.mapToGlobal(position))
-        if selected_action is mark_read_action:
+        if selected_action is view_titles_action:
+            self._open_group_messages_dialog(group)
+        elif selected_action is mark_read_action:
             self._mark_group_as_read_for_group(group)
         elif selected_action is delete_action:
             self._delete_group_for_group(group)
@@ -809,6 +814,31 @@ class MainWindow(SmartMainWindow):
         elif self.sender_categorization and selected_action is clear_impact_action:
             self.sender_categorization.clear_sender_exception(group.sender_email)
             self._infer_store_current_groups()
+
+    def _open_group_messages_dialog(self, group: MessageGroup) -> None:
+        """Open a dialog listing every message's title/sender/date in
+        ``group`` -- built entirely from already-loaded data, so viewing it
+        never triggers a MessageBodyWorkerThread the way selecting a group
+        or stepping through Next/Previous does."""
+        dialog = GroupMessagesDialog(
+            group=group,
+            on_mark_read=self._mark_group_as_read_for_group,
+            on_delete_group=self._delete_group_for_group,
+            on_block_sender=self._block_sender_for_group,
+            on_open_message=self._open_message_from_dialog,
+            parent=self,
+        )
+        dialog.exec()
+
+    def _open_message_from_dialog(self, group: MessageGroup, message_index: int) -> None:
+        """Select a specific message (e.g. double-clicked in
+        GroupMessagesDialog) in the main detail panel."""
+        group_index = self._find_group_index(group)
+        if group_index is None:
+            return
+        self.current_group_index = group_index
+        self.current_message_index = message_index
+        self._display_current_message()
 
     def _find_group_index(self, group: MessageGroup) -> Optional[int]:
         """Find current group index by sender identity."""

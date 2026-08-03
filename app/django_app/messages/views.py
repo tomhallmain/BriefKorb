@@ -398,12 +398,22 @@ def messages_api_view(request):
     return JsonResponse({'messages': message_data})
 
 
-@require_GET
 def inbox_view(request):
     """Browse and read individual messages across every authenticated
     provider (Microsoft and/or Gmail). Built on UnifiedEmailServer, the
     same layer messages_api_view and (as of this migration) messages_view
-    both use."""
+    both use.
+
+    Also handles the per-bucket Mark as Read/Delete/Block + Delete actions
+    in inbox.html's <details> blocks (POST) -- reuses
+    _resolve_selected_buckets()/_perform_bulk_action() wholesale, the same
+    generic helpers messages_view's bulk actions already use, rather than
+    duplicating that logic. No longer @require_GET now that it handles POST
+    too; the mailbox/unread_only/oldest_first display params still come
+    from request.GET (query string) regardless of method, since the
+    per-bucket forms POST back to the current URL with no `action`
+    attribute -- the query string that was already loaded stays intact.
+    """
     config, error = _load_config()
     if not error:
         server, error = _load_authenticated_server(config)
@@ -418,6 +428,20 @@ def inbox_view(request):
 
     try:
         sender_categorization = SenderCategorizationManager(config.token_storage_path)
+
+        if request.method == 'POST':
+            sender_key = request.POST.get('sender_key', '').strip()
+            action = None
+            if 'markAsRead' in request.POST:
+                action = 'markAsRead'
+            elif 'deleteMessage' in request.POST:
+                action = 'deleteMessage'
+            elif 'deleteMessageBlockSender' in request.POST:
+                action = 'deleteMessageBlockSender'
+            if action and sender_key:
+                selected_buckets = _resolve_selected_buckets(server, mailbox, [sender_key])
+                _perform_bulk_action(request, server, action, selected_buckets)
+
         messages = server.get_user_messages(folder=mailbox, unread_only=unread_only, max_messages=1000)
         message_data = server.get_message_digest(messages=messages)
         message_data = annotate_sender_impact(message_data, sender_categorization)

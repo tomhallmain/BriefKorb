@@ -225,6 +225,102 @@ def test_inbox_view_shows_error_when_fetch_raises(client: Client, tmp_path: Path
     assert 'graph api down' in response.context['error']
 
 
+def _bucket_for_inbox(provider: str, from_name: str, from_address: str, message_ids) -> Dict[str, Any]:
+    """Digest bucket shaped like UnifiedEmailServer.get_message_digest()'s
+    output -- enough for _resolve_selected_buckets()/_perform_bulk_action()
+    to resolve and act on (see test_messages_views.py's _bucket(), which
+    this mirrors; not imported directly since these are separate test
+    modules)."""
+    return {
+        'fromName': from_name, 'fromAddress': from_address, 'provider': provider,
+        'subject': 'Hi', 'lastReceivedDateTime': '2024-01-01T00:00:00+00:00',
+        'count': len(message_ids),
+        'messages': [{'id': mid, 'subject': 'Hi', 'lastReceivedDateTime': '', 'isRead': False} for mid in message_ids],
+    }
+
+
+def test_inbox_view_post_mark_as_read_action(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_config(tmp_path)
+    _patch_impact_categorization(monkeypatch)
+    fake_server = FakeUnifiedEmailServer(
+        authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')],
+        digest=[_bucket_for_inbox('microsoft', 'Alice', 'a@example.com', ['m1', 'm2'])],
+    )
+    _patch_server(monkeypatch, fake_server)
+
+    response = client.post(reverse('django_app.messages:inbox'), {
+        'sender_key': 'microsoft|Alice', 'markAsRead': '1',
+    })
+
+    assert response.status_code == 200
+    assert fake_server.mark_messages_as_read_calls == [
+        {'user_id': 'user1', 'provider_name': 'microsoft', 'message_ids': ['m1', 'm2']}
+    ]
+
+
+def test_inbox_view_post_delete_action(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_config(tmp_path)
+    _patch_impact_categorization(monkeypatch)
+    fake_server = FakeUnifiedEmailServer(
+        authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')],
+        digest=[_bucket_for_inbox('microsoft', 'Alice', 'a@example.com', ['m1'])],
+    )
+    _patch_server(monkeypatch, fake_server)
+
+    response = client.post(reverse('django_app.messages:inbox'), {
+        'sender_key': 'microsoft|Alice', 'deleteMessage': '1',
+    })
+
+    assert response.status_code == 200
+    assert fake_server.delete_user_messages_calls == [
+        {'user_id': 'user1', 'provider_name': 'microsoft', 'message_ids': ['m1']}
+    ]
+
+
+def test_inbox_view_post_block_and_delete_action(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_config(tmp_path)
+    _patch_impact_categorization(monkeypatch)
+    fake_server = FakeUnifiedEmailServer(
+        authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')],
+        digest=[_bucket_for_inbox('microsoft', 'Alice', 'a@example.com', ['m1'])],
+    )
+    _patch_server(monkeypatch, fake_server)
+
+    response = client.post(reverse('django_app.messages:inbox'), {
+        'sender_key': 'microsoft|Alice', 'deleteMessageBlockSender': '1',
+    })
+
+    assert response.status_code == 200
+    assert fake_server.delete_user_messages_calls == [
+        {'user_id': 'user1', 'provider_name': 'microsoft', 'message_ids': ['m1']}
+    ]
+    assert fake_server.block_senders_calls == [{
+        'user_id': 'user1', 'provider_name': 'microsoft', 'sender_names': ['a@example.com'],
+        'source': 'django_web_messages',
+        'sender_details': {'a@example.com': {'display_name': 'Alice', 'subjects': ['Hi'], 'message_count': 1}},
+    }]
+
+
+def test_inbox_view_get_does_not_trigger_any_action(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A plain GET (no action fields at all) must not accidentally resolve
+    to an action -- 'action and sender_key' both being required guards
+    this, but worth pinning down given @require_GET was removed."""
+    _write_config(tmp_path)
+    _patch_impact_categorization(monkeypatch)
+    fake_server = FakeUnifiedEmailServer(
+        authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')],
+        digest=[_bucket_for_inbox('microsoft', 'Alice', 'a@example.com', ['m1'])],
+    )
+    _patch_server(monkeypatch, fake_server)
+
+    response = client.get(reverse('django_app.messages:inbox'))
+
+    assert response.status_code == 200
+    assert fake_server.mark_messages_as_read_calls == []
+    assert fake_server.delete_user_messages_calls == []
+    assert fake_server.block_senders_calls == []
+
+
 # --- message_detail_view --------------------------------------------------------
 
 def test_message_detail_view_shows_error_when_config_missing(client: Client) -> None:
