@@ -27,6 +27,7 @@ from widgets.compose_dialog import ComposeDialog
 from ui.auth_settings_dialog import AuthSettingsDialog
 from ui.sender_categorization_window import SenderCategorizationWindow
 from ui.blocked_senders_window import BlockedSendersWindow
+from ui.low_impact_senders_window import LowImpactSendersWindow
 from email_client.utils.scope_checker import ScopeChecker
 from email_client.utils.message_grouping import MessageGroup, group_messages_by_sender
 from email_client.utils.content_type import ContentType
@@ -71,6 +72,7 @@ class MainWindow(SmartMainWindow):
         self.sender_categorization: Optional[SenderCategorizationManager] = None
         self.sender_categorization_window: Optional[SenderCategorizationWindow] = None
         self.blocked_senders_window: Optional[BlockedSendersWindow] = None
+        self.low_impact_senders_window: Optional[LowImpactSendersWindow] = None
         # Desired splitter widths — updated only when the user drags the handle.
         # Used to restore positions after content-driven layout passes.
         self._splitter_sizes: List[int] = [400, 600]
@@ -176,6 +178,15 @@ class MainWindow(SmartMainWindow):
         self.blocked_senders_btn = QPushButton("Blocked Senders")
         self.blocked_senders_btn.clicked.connect(self._open_blocked_senders)
         layout.addWidget(self.blocked_senders_btn)
+
+        # Low-impact senders button
+        self.low_impact_senders_btn = QPushButton("Low-Impact Senders")
+        self.low_impact_senders_btn.setToolTip(
+            "Senders classified as low-impact (subscriptions, ads, etc.) are hidden from the "
+            "main list by default -- view and act on them here."
+        )
+        self.low_impact_senders_btn.clicked.connect(self._open_low_impact_senders)
+        layout.addWidget(self.low_impact_senders_btn)
 
         layout.addStretch()
         
@@ -636,7 +647,9 @@ class MainWindow(SmartMainWindow):
         """Update the message list widget to show message groups.
 
         Suspected bot/spam groups (see ``SenderCategorizationManager.is_suspected_bot_spam_group``)
-        are omitted unless ``Suspected Spam Only`` is checked.
+        are omitted unless ``Suspected Spam Only`` is checked. Confirmed low-impact groups
+        (subscriptions, ads, etc. -- see ``is_low_impact_group``) are always omitted; they're
+        reachable from the "Low-Impact Senders" window instead (see _open_low_impact_senders).
         """
         self.message_list.clear()
         
@@ -660,6 +673,7 @@ class MainWindow(SmartMainWindow):
                 groups_to_show = [
                     g for g in groups_to_show
                     if not self.sender_categorization.is_suspected_bot_spam_group(g)
+                    and not self.sender_categorization.is_low_impact_group(g)
                 ]
 
         if high_impact_only and self.sender_categorization:
@@ -711,7 +725,31 @@ class MainWindow(SmartMainWindow):
             f"Showing {len(groups_to_show)} groups ({total_messages} messages — "
             f"{total_unread} unread, {total_read} read)"
         )
-    
+
+        # Keep the low-impact senders window (if open) in sync -- it's a
+        # plain snapshot of self.current_groups, not a live view, so every
+        # main-list refresh (new messages, a group deleted/blocked/promoted
+        # via either window) needs to push the current low-impact set to it.
+        if self.low_impact_senders_window is not None:
+            self.low_impact_senders_window.set_groups(self._low_impact_groups())
+
+    def _low_impact_groups(self) -> List[MessageGroup]:
+        """Groups classified as low-impact (subscriptions, ads, etc.) -- the
+        set _update_message_list() excludes from the main list by default,
+        and _open_low_impact_senders()'s window shows instead."""
+        if not self.sender_categorization:
+            return []
+        return [g for g in self.current_groups if self.sender_categorization.is_low_impact_group(g)]
+
+    def _promote_group_to_high_impact(self, group: MessageGroup) -> None:
+        """Override a sender's impact classification to high-impact -- used by the
+        low-impact senders window's "Treat as High-Impact" button to move a sender
+        back into the main list."""
+        if not self.sender_categorization:
+            return
+        self.sender_categorization.set_sender_exception(group.sender_email, ImpactLevel.HIGH_IMPACT)
+        self._update_message_list()
+
     def _on_message_selected(self, item: QListWidgetItem):
         """Handle message group selection"""
         group = item.data(Qt.UserRole)
@@ -1469,3 +1507,23 @@ class MainWindow(SmartMainWindow):
         self.blocked_senders_window.show()
         self.blocked_senders_window.raise_()
         self.blocked_senders_window.activateWindow()
+
+    def _open_low_impact_senders(self):
+        """Open the low-impact senders viewer window."""
+        if not self.sender_categorization:
+            QMessageBox.warning(self, "Not Ready", "Sender categorization is not available yet.")
+            return
+        if self.low_impact_senders_window is None:
+            self.low_impact_senders_window = LowImpactSendersWindow(
+                groups=self._low_impact_groups(),
+                on_mark_read=self._mark_group_as_read_for_group,
+                on_delete_group=self._delete_group_for_group,
+                on_block_sender=self._block_sender_for_group,
+                on_promote_to_high_impact=self._promote_group_to_high_impact,
+                parent=self,
+            )
+        else:
+            self.low_impact_senders_window.set_groups(self._low_impact_groups())
+        self.low_impact_senders_window.show()
+        self.low_impact_senders_window.raise_()
+        self.low_impact_senders_window.activateWindow()

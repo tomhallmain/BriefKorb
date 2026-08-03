@@ -41,6 +41,41 @@ def _write_config(tmp_path: Path, microsoft_enabled: bool = True, gmail_enabled:
     config.save(os.environ['BRIEFKORB_CONFIG_PATH'])
 
 
+@dataclass
+class _FakeImpactCategorization:
+    """Minimal double supporting only what annotate_sender_impact() calls --
+    inbox_view now unconditionally constructs a SenderCategorizationManager
+    (needed for the default low-impact exclusion), so every test that
+    reaches inbox_view's main try block needs this patched in, the same
+    way every messages_view test already patches its own (richer, exception-
+    supporting) FakeSenderCategorizationManager in test_messages_views.py."""
+    impacts: Dict[str, str] = field(default_factory=dict)
+
+    def infer_for_sender(self, sender_email: str, subjects: List[str]) -> ImpactInference:
+        return ImpactInference(
+            impact=ImpactLevel(self.impacts.get(sender_email, ImpactLevel.UNCLASSIFIED.value)),
+            reason='fake', confidence=0.5,
+            generic_inference_score=0.1, blocklist_inference_score=0.2, bot_spam_inference_score=0.3,
+        )
+
+    def set_inferred_sender_impact(self, sender_email: str, inference: ImpactInference) -> None:
+        self.impacts[sender_email] = inference.impact.value
+
+    def get_sender_impact(self, sender_email: str) -> ImpactLevel:
+        return ImpactLevel(self.impacts.get(sender_email, ImpactLevel.UNCLASSIFIED.value))
+
+    def has_sender_exception(self, sender_email: str) -> bool:
+        return False
+
+
+def _patch_impact_categorization(
+    monkeypatch: pytest.MonkeyPatch, fake: Optional[_FakeImpactCategorization] = None,
+) -> _FakeImpactCategorization:
+    fake = fake or _FakeImpactCategorization()
+    monkeypatch.setattr(messages_views_module, 'SenderCategorizationManager', lambda storage_path: fake)
+    return fake
+
+
 # --- inbox_view --------------------------------------------------------------
 
 def test_inbox_view_shows_error_when_config_missing(client: Client) -> None:
@@ -72,6 +107,7 @@ def test_inbox_view_shows_error_when_no_authenticated_provider(client: Client, t
 
 def test_inbox_view_renders_digest_and_entity_count(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_config(tmp_path)
+    _patch_impact_categorization(monkeypatch)
     fake_server = FakeUnifiedEmailServer(
         authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')],
         messages=['m1', 'm2'],
@@ -95,6 +131,7 @@ def test_inbox_view_renders_digest_and_entity_count(client: Client, tmp_path: Pa
 
 def test_inbox_view_passes_mailbox_and_unread_only_query_params(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_config(tmp_path)
+    _patch_impact_categorization(monkeypatch)
     fake_server = FakeUnifiedEmailServer(authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')])
     _patch_server(monkeypatch, fake_server)
 
@@ -104,8 +141,34 @@ def test_inbox_view_passes_mailbox_and_unread_only_query_params(client: Client, 
     assert fake_server.get_user_messages_calls[0]['unread_only'] is False
 
 
+def test_inbox_view_excludes_low_impact_senders_by_default(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_config(tmp_path)
+    _patch_impact_categorization(monkeypatch, _FakeImpactCategorization(impacts={
+        'a@example.com': ImpactLevel.HIGH_IMPACT.value,
+        'b@example.com': ImpactLevel.LOW_IMPACT.value,
+        'c@example.com': ImpactLevel.UNCLASSIFIED.value,
+    }))
+    fake_server = FakeUnifiedEmailServer(
+        authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')],
+        digest=[
+            {'fromName': 'A', 'fromAddress': 'a@example.com', 'provider': 'microsoft', 'count': 1, 'messages': []},
+            {'fromName': 'B', 'fromAddress': 'b@example.com', 'provider': 'microsoft', 'count': 1, 'messages': []},
+            {'fromName': 'C', 'fromAddress': 'c@example.com', 'provider': 'microsoft', 'count': 1, 'messages': []},
+        ],
+    )
+    _patch_server(monkeypatch, fake_server)
+
+    response = client.get(reverse('django_app.messages:inbox'))
+
+    addresses = [b['fromAddress'] for b in response.context['messageData']]
+    assert 'b@example.com' not in addresses
+    assert 'a@example.com' in addresses
+    assert 'c@example.com' in addresses  # unclassified is unaffected
+
+
 def test_inbox_view_oldest_first_sorts_message_data_ascending(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_config(tmp_path)
+    _patch_impact_categorization(monkeypatch)
     fake_server = FakeUnifiedEmailServer(
         authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')],
         digest=[
@@ -127,6 +190,7 @@ def test_inbox_view_oldest_first_sorts_message_data_ascending(client: Client, tm
 
 def test_inbox_view_oldest_first_defaults_false_and_leaves_digest_order_unchanged(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_config(tmp_path)
+    _patch_impact_categorization(monkeypatch)
     fake_server = FakeUnifiedEmailServer(
         authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')],
         digest=[
@@ -148,6 +212,7 @@ def test_inbox_view_oldest_first_defaults_false_and_leaves_digest_order_unchange
 
 def test_inbox_view_shows_error_when_fetch_raises(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_config(tmp_path)
+    _patch_impact_categorization(monkeypatch)
     fake_server = FakeUnifiedEmailServer(
         authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')],
         raise_on_fetch=RuntimeError('graph api down'),

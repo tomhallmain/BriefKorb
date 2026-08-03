@@ -84,6 +84,9 @@ class SenderCategorizationManager:
     def is_high_impact_group(self, group: MessageGroup) -> bool:
         return self.is_high_impact_sender(group.sender_email)
 
+    def is_low_impact_group(self, group: MessageGroup) -> bool:
+        return self.get_sender_impact(group.sender_email) == ImpactLevel.LOW_IMPACT
+
     def is_suspected_bot_spam_group(self, group: MessageGroup) -> bool:
         """True if the last stored inference for this sender was low-impact due to bot/spam heuristics.
 

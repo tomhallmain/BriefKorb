@@ -2,7 +2,11 @@
 {% block content %}
 <div class="container mt-4">
     <h1>Browse &amp; Read Messages</h1>
-    <p><a href="{% url 'django_app.messages:messages' %}">&larr; Back to Messages</a></p>
+    <p>
+        <a href="{% url 'django_app.messages:messages' %}">&larr; Back to Messages</a>
+        &nbsp;|&nbsp;
+        <a href="{% url 'django_app.messages:low_impact_senders' %}">Low-Impact Senders &rarr;</a>
+    </p>
 
     {% if error %}
         <div class="alert alert-danger" role="alert">{{ error }}</div>

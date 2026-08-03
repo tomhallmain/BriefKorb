@@ -108,12 +108,22 @@ def _perform_bulk_action(request, server: UnifiedEmailServer, action: str, selec
         django_messages.error(request, f"Failed to update messages from {subject_desc}.")
 
 
-def messages_view(request):
+def messages_view(request, low_impact_only: bool = False):
     """Display messages aggregated by sender, and handle mark-as-read/
     delete/block-sender/impact-override actions. Built on
     UnifiedEmailServer, same as inbox_view and messages_api_view -- this
     is the last of the three to migrate off the older, Microsoft-only
-    MessagesService path."""
+    MessagesService path.
+
+    `low_impact_only` is set via urls.py's extra-kwargs mechanism for the
+    `messages/low-impact` route (see low_impact_senders in urls.py) -- the
+    "separate view" for confirmed low-impact senders (subscriptions, ads,
+    etc.) that the default route hides them from. It's the same view
+    function and template as the main `messages` route (no duplicated
+    display/action logic -- mark-as-read/delete/block/impact-override all
+    work identically there), just with the opposite impact filter applied
+    and a couple of controls hidden in the template (see messages.html).
+    """
     config, error = _load_config()
     if not error:
         server, error = _load_authenticated_server(config)
@@ -123,6 +133,7 @@ def messages_view(request):
             'messages_length': 0,
             'mailbox': 'inbox',
             'exclude_read_messages': True,
+            'low_impact_only': low_impact_only,
             'error': error,
             'is_authenticated': False,
         })
@@ -193,10 +204,26 @@ def messages_view(request):
         messages = server.get_user_messages(folder=mailbox, unread_only=exclude_read, max_messages=1000)
         message_data = server.get_message_digest(messages=messages)
         message_data = annotate_sender_impact(message_data, sender_categorization)
-        if high_impact_only:
+        if low_impact_only:
+            message_data = [
+                msg_info for msg_info in message_data
+                if msg_info.get('impact') == ImpactLevel.LOW_IMPACT.value
+            ]
+        elif high_impact_only:
             message_data = [
                 msg_info for msg_info in message_data
                 if msg_info.get('impact') == ImpactLevel.HIGH_IMPACT.value
+            ]
+        else:
+            # Confirmed low-impact senders (subscriptions, ads, etc.) are
+            # hidden from the default list -- see messages/low-impact
+            # (low_impact_only=True above) for the "separate view" they're
+            # still reachable from. Unclassified senders are unaffected:
+            # this is about senders confidently identified as low-value,
+            # not "innocent until proven high-impact".
+            message_data = [
+                msg_info for msg_info in message_data
+                if msg_info.get('impact') != ImpactLevel.LOW_IMPACT.value
             ]
 
         if oldest_first:
@@ -223,6 +250,7 @@ def messages_view(request):
             'exclude_read_messages': exclude_read,
             'high_impact_only': high_impact_only,
             'oldest_first': oldest_first,
+            'low_impact_only': low_impact_only,
             'has_performed_update': has_performed_update,
             'is_authenticated': True,
         }
@@ -236,6 +264,7 @@ def messages_view(request):
             'messages_length': 0,
             'mailbox': 'inbox',
             'exclude_read_messages': True,
+            'low_impact_only': low_impact_only,
             'error': str(e),
             'is_authenticated': False,
         })
@@ -388,8 +417,18 @@ def inbox_view(request):
     oldest_first = _parse_bool_param(request, 'oldest_first', default=False)
 
     try:
+        sender_categorization = SenderCategorizationManager(config.token_storage_path)
         messages = server.get_user_messages(folder=mailbox, unread_only=unread_only, max_messages=1000)
         message_data = server.get_message_digest(messages=messages)
+        message_data = annotate_sender_impact(message_data, sender_categorization)
+        # Confirmed low-impact senders (subscriptions, ads, etc.) are hidden
+        # from the default browse list -- see the low_impact_senders route
+        # (messages/low-impact) for the "separate view" they're still
+        # reachable from. Unclassified senders are unaffected.
+        message_data = [
+            msg_info for msg_info in message_data
+            if msg_info.get('impact') != ImpactLevel.LOW_IMPACT.value
+        ]
         if oldest_first:
             # lastReceivedDateTime is an ISO-8601 string (see
             # UnifiedEmailServer.get_message_digest) built from received_date

@@ -167,6 +167,74 @@ def test_messages_view_high_impact_only_filters_message_data(client: Client, tmp
     assert response.context['messageData'][0]['fromAddress'] == 'a@example.com'
 
 
+def test_messages_view_default_route_excludes_low_impact_senders(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_config(tmp_path)
+    fake_categorization = _patch_sender_categorization(monkeypatch)
+    fake_categorization.impacts = {
+        'a@example.com': ImpactLevel.HIGH_IMPACT.value,
+        'b@example.com': ImpactLevel.LOW_IMPACT.value,
+        'c@example.com': ImpactLevel.UNCLASSIFIED.value,
+    }
+    fake_server = FakeUnifiedEmailServer(
+        authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')],
+        digest=[
+            _bucket('microsoft', 'A', 'a@example.com', ['m1']),
+            _bucket('microsoft', 'B', 'b@example.com', ['m2']),
+            _bucket('microsoft', 'C', 'c@example.com', ['m3']),
+        ],
+    )
+    _patch_server(monkeypatch, fake_server)
+
+    response = client.get(reverse('django_app.messages:messages'))
+
+    addresses = [b['fromAddress'] for b in response.context['messageData']]
+    assert 'b@example.com' not in addresses
+    assert 'a@example.com' in addresses
+    assert 'c@example.com' in addresses  # unclassified is unaffected
+    assert response.context['low_impact_only'] is False
+
+
+def test_low_impact_senders_route_shows_only_low_impact_senders(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_config(tmp_path)
+    fake_categorization = _patch_sender_categorization(monkeypatch)
+    fake_categorization.impacts = {
+        'a@example.com': ImpactLevel.HIGH_IMPACT.value,
+        'b@example.com': ImpactLevel.LOW_IMPACT.value,
+    }
+    fake_server = FakeUnifiedEmailServer(
+        authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')],
+        digest=[
+            _bucket('microsoft', 'A', 'a@example.com', ['m1']),
+            _bucket('microsoft', 'B', 'b@example.com', ['m2']),
+        ],
+    )
+    _patch_server(monkeypatch, fake_server)
+
+    response = client.get(reverse('django_app.messages:low_impact_senders'))
+
+    assert [b['fromAddress'] for b in response.context['messageData']] == ['b@example.com']
+    assert response.context['low_impact_only'] is True
+
+
+def test_low_impact_senders_route_reuses_messages_view_actions(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The low-impact route is the same view+template as `messages` (see
+    urls.py's extra-kwargs wiring) -- setImpact (the existing per-row
+    "Treat as High-Impact" button) should work identically there, with no
+    separate action-handling code needed."""
+    _write_config(tmp_path)
+    fake_categorization = _patch_sender_categorization(monkeypatch)
+    fake_server = FakeUnifiedEmailServer(authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')])
+    _patch_server(monkeypatch, fake_server)
+
+    response = client.post(
+        reverse('django_app.messages:low_impact_senders'),
+        {'setImpact': 'a@example.com|high-impact'},
+    )
+
+    assert fake_categorization.exceptions == {'a@example.com': ImpactLevel.HIGH_IMPACT}
+    assert response.context['low_impact_only'] is True
+
+
 def test_messages_view_oldest_first_sorts_message_data_ascending(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_config(tmp_path)
     _patch_sender_categorization(monkeypatch)

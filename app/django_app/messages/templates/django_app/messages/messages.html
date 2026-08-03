@@ -3,10 +3,20 @@
 <div class="container mt-4">
     <div class="row">
         <div class="col">
-            <h1>Message Data</h1>
+            <h1>{% if low_impact_only %}Low-Impact Senders{% else %}Message Data{% endif %}</h1>
         </div>
     </div>
+    {% if low_impact_only %}
+        <p class="text-muted">
+            Senders classified as low-impact (subscriptions, ads, etc.) -- kept out of the main
+            Message Data list by default. Use the Low / High buttons below to reclassify a sender.
+        </p>
+    {% endif %}
     <p>
+        <a href="{% url 'django_app.messages:messages' %}">Message Data &rarr;</a>
+        &nbsp;|&nbsp;
+        <a href="{% url 'django_app.messages:low_impact_senders' %}">Low-Impact Senders &rarr;</a>
+        &nbsp;|&nbsp;
         <a href="{% url 'django_app.messages:inbox' %}">Browse &amp; Read Messages &rarr;</a>
         &nbsp;|&nbsp;
         <a href="{% url 'django_app.messages:sender_categorization' %}">Sender Categorization &rarr;</a>
@@ -84,6 +94,7 @@
                 </label>
                 <button type="submit" name="excludeRead" class="btn btn-secondary btn-sm ml-2">Update</button>
             </div>
+            {% if not low_impact_only %}
             <div class="col">
                 <label>
                     <input type="checkbox" name="highImpactOnly" value="highImpactOnly" {% if high_impact_only %}checked{% endif %}>
@@ -91,6 +102,7 @@
                 </label>
                 <button type="submit" name="highImpactOnly" class="btn btn-secondary btn-sm ml-2">Update</button>
             </div>
+            {% endif %}
             <div class="col">
                 <label>
                     <input type="checkbox" name="oldestFirst" value="oldestFirst" {% if oldest_first %}checked{% endif %}>
