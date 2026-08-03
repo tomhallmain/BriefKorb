@@ -210,6 +210,14 @@ class MainWindow(SmartMainWindow):
         )
         self.suspected_spam_only_checkbox.toggled.connect(self._on_suspected_spam_filter_toggled)
         filter_layout.addWidget(self.suspected_spam_only_checkbox)
+        self.oldest_first_checkbox = QPushButton("Oldest First")
+        self.oldest_first_checkbox.setCheckable(True)
+        self.oldest_first_checkbox.setToolTip(
+            "When on, groups are listed starting with the earliest (oldest) message activity "
+            "instead of the most recent."
+        )
+        self.oldest_first_checkbox.toggled.connect(self._on_oldest_first_toggled)
+        filter_layout.addWidget(self.oldest_first_checkbox)
         self.unread_only_checkbox.toggled.connect(self._sync_filter_button_labels)
         filter_layout.addStretch()
         layout.addLayout(filter_layout)
@@ -659,6 +667,13 @@ class MainWindow(SmartMainWindow):
                 g for g in groups_to_show
                 if self.sender_categorization.is_high_impact_group(g)
             ]
+
+        # current_groups is sorted most-recent-first; reverse the *displayed*
+        # order only -- current_group_index resolves by sender_email (see
+        # _find_group_index/_on_message_selected), not list position, so this
+        # can't disturb group selection.
+        if self.oldest_first_checkbox.isChecked():
+            groups_to_show = list(reversed(groups_to_show))
 
         # Add groups to list
         for group in groups_to_show:
@@ -1368,6 +1383,13 @@ class MainWindow(SmartMainWindow):
         self.suspected_spam_only_checkbox.setText(
             "Suspected Spam Only (on)" if self.suspected_spam_only_checkbox.isChecked() else "Suspected Spam Only"
         )
+        self.oldest_first_checkbox.setText(
+            "Oldest First (on)" if self.oldest_first_checkbox.isChecked() else "Oldest First"
+        )
+
+    def _on_oldest_first_toggled(self, checked: bool) -> None:
+        self._sync_filter_button_labels()
+        self._update_message_list()
 
     def _on_high_impact_filter_toggled(self, checked: bool) -> None:
         if checked and self.suspected_spam_only_checkbox.isChecked():
