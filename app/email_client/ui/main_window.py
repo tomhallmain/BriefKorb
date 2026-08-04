@@ -94,7 +94,27 @@ class MainWindow(SmartMainWindow):
         # Defer post-init until the event loop is running and the window has
         # its real geometry, so setSizes() lands on a fully-laid-out splitter.
         QTimer.singleShot(0, self._post_init)
-    
+
+    def closeEvent(self, event):
+        """Stop any still-running background worker before the window closes.
+
+        Without this, a worker thread left running when the app closes is
+        simply abandoned: PySide6 either force-terminates it mid-operation,
+        or its queued result signal fires into a slot (e.g.
+        _on_body_content_ready) that touches widgets already being torn
+        down. blockSignals() stops any such queued delivery; quit()+wait()
+        (falling back to terminate() if a worker doesn't stop promptly)
+        ensures nothing is still running when the window actually closes.
+        """
+        for worker in (self.worker_thread, self.body_worker_thread, self.entity_extraction_worker):
+            if worker and worker.isRunning():
+                worker.blockSignals(True)
+                worker.quit()
+                if not worker.wait(3000):
+                    worker.terminate()
+                    worker.wait()
+        super().closeEvent(event)
+
     def _init_ui(self):
         """Initialize the user interface"""
         self.setWindowTitle("BriefKorb - Unified Email Client")
