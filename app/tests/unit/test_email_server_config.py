@@ -58,6 +58,36 @@ def test_from_dict_reads_provider_fields() -> None:
     assert config.log_level == 'DEBUG'
 
 
+def test_from_dict_defaults_max_messages_to_200() -> None:
+    config = EmailServerConfig.from_dict(_minimal_config_dict())
+
+    assert config.max_messages == 200
+
+
+def test_from_dict_reads_max_messages() -> None:
+    config = EmailServerConfig.from_dict({**_minimal_config_dict(), 'max_messages': 500})
+
+    assert config.max_messages == 500
+
+
+def test_to_dict_round_trips_max_messages() -> None:
+    original = EmailServerConfig.from_dict({**_minimal_config_dict(), 'max_messages': 42})
+
+    round_tripped = EmailServerConfig.from_dict(original.to_dict())
+
+    assert round_tripped.max_messages == 42
+
+
+def test_save_and_from_file_round_trips_max_messages(tmp_path: Path) -> None:
+    config_path = tmp_path / 'config.yaml'
+    original = EmailServerConfig.from_dict({**_minimal_config_dict(), 'max_messages': 75})
+
+    original.save(str(config_path))
+    loaded = EmailServerConfig.from_file(str(config_path))
+
+    assert loaded.max_messages == 75
+
+
 def test_to_dict_round_trips_through_from_dict() -> None:
     original = EmailServerConfig.from_dict({
         'microsoft': {'enabled': True, 'client_id': 'ms-client'},
@@ -157,6 +187,23 @@ def test_validate_raises_when_gmail_enabled_but_missing_fields() -> None:
         assert False, "expected ValueError"
     except ValueError as e:
         assert "Gmail provider requires" in str(e)
+
+
+def test_validate_raises_when_max_messages_below_one() -> None:
+    config = EmailServerConfig(
+        microsoft=ProviderConfig(
+            enabled=True, client_id='id', client_secret='secret',
+            redirect_uri='http://x/callback', tenant_id='tenant',
+        ),
+        gmail=ProviderConfig(enabled=False),
+        max_messages=0,
+    )
+
+    try:
+        config.validate()
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "max_messages must be at least 1" in str(e)
 
 
 def test_validate_creates_token_storage_directory(tmp_path: Path) -> None:

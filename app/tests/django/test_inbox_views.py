@@ -32,11 +32,15 @@ from email_server.config import EmailServerConfig, ProviderConfig
 from _fake_unified_email_server import FakeAuthenticatedProvider, FakeUnifiedEmailServer, patch_server as _patch_server
 
 
-def _write_config(tmp_path: Path, microsoft_enabled: bool = True, gmail_enabled: bool = False) -> None:
+def _write_config(
+    tmp_path: Path, microsoft_enabled: bool = True, gmail_enabled: bool = False,
+    max_messages: int = 200,
+) -> None:
     config = EmailServerConfig(
         microsoft=ProviderConfig(enabled=microsoft_enabled),
         gmail=ProviderConfig(enabled=gmail_enabled),
         token_storage_path=str(tmp_path / 'tokens'),
+        max_messages=max_messages,
     )
     config.save(os.environ['BRIEFKORB_CONFIG_PATH'])
 
@@ -127,6 +131,17 @@ def test_inbox_view_renders_digest_and_entity_count(client: Client, tmp_path: Pa
     # trigger a second live fetch.
     assert fake_server.get_message_digest_calls[0]['messages'] == ['m1', 'm2']
     assert fake_server.extract_entities_calls == [['m1', 'm2']]
+
+
+def test_inbox_view_fetches_with_configured_max_messages(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_config(tmp_path, max_messages=63)
+    _patch_impact_categorization(monkeypatch)
+    fake_server = FakeUnifiedEmailServer(authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')])
+    _patch_server(monkeypatch, fake_server)
+
+    client.get(reverse('django_app.messages:inbox'))
+
+    assert fake_server.get_user_messages_calls[0]['max_messages'] == 63
 
 
 def test_inbox_view_passes_mailbox_and_unread_only_query_params(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

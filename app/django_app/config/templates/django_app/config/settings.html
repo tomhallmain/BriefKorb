@@ -188,6 +188,16 @@
         </select>
       </div>
 
+      <div class="form-group">
+        <label for="max_messages">Max Messages</label>
+        <input type="number" class="form-control w-auto" id="max_messages" name="max_messages"
+               min="1" step="1"
+               value="{{ config.max_messages|default:200 }}">
+        <small class="form-text text-muted">
+          Cap on how many messages a single fetch/display pulls in at once.
+        </small>
+      </div>
+
     </div><!-- /general -->
 
   </div><!-- /tab-content -->

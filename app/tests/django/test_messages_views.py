@@ -27,11 +27,15 @@ from email_server.config import EmailServerConfig, ExternalApiConfig, ExternalAp
 from _fake_unified_email_server import FakeAuthenticatedProvider, FakeUnifiedEmailServer, patch_server as _patch_server
 
 
-def _write_config(tmp_path: Path, microsoft_enabled: bool = True, gmail_enabled: bool = False) -> None:
+def _write_config(
+    tmp_path: Path, microsoft_enabled: bool = True, gmail_enabled: bool = False,
+    max_messages: int = 200,
+) -> None:
     config = EmailServerConfig(
         microsoft=ProviderConfig(enabled=microsoft_enabled),
         gmail=ProviderConfig(enabled=gmail_enabled),
         token_storage_path=str(tmp_path / 'tokens'),
+        max_messages=max_messages,
     )
     config.save(os.environ['BRIEFKORB_CONFIG_PATH'])
 
@@ -146,6 +150,17 @@ def test_messages_view_get_lists_messages_with_default_mailbox(client: Client, t
     assert fake_server.get_user_messages_calls[0]['unread_only'] is True
     assert response.context['messageData'][0]['fromName'] == 'Alice'
     assert response.context['messageData'][0]['provider'] == 'microsoft'
+
+
+def test_messages_view_fetches_with_configured_max_messages(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_config(tmp_path, max_messages=77)
+    _patch_sender_categorization(monkeypatch)
+    fake_server = FakeUnifiedEmailServer(authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')])
+    _patch_server(monkeypatch, fake_server)
+
+    client.get(reverse('django_app.messages:messages'))
+
+    assert fake_server.get_user_messages_calls[0]['max_messages'] == 77
 
 
 def test_messages_view_high_impact_only_filters_message_data(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -493,12 +508,16 @@ def test_messages_view_context_sender_takes_precedence_over_selected_options(cli
 # Auth (require_external_api_token) has its own dedicated coverage in
 # test_authentication.py.
 
-def _write_external_api_config(tmp_path: Path, token: str = 'good-token', enabled: bool = True, provider_enabled: bool = True) -> Path:
+def _write_external_api_config(
+    tmp_path: Path, token: str = 'good-token', enabled: bool = True, provider_enabled: bool = True,
+    max_messages: int = 200,
+) -> Path:
     token_dir = tmp_path / 'tokens'
     config = EmailServerConfig(
         microsoft=ProviderConfig(enabled=provider_enabled),
         gmail=ProviderConfig(enabled=False),
         token_storage_path=str(token_dir),
+        max_messages=max_messages,
         external_api=ExternalApiConfig(enabled=enabled, tokens=[ExternalApiToken(token=token, label='tagesform')]),
     )
     config.save(os.environ['BRIEFKORB_CONFIG_PATH'])
@@ -581,11 +600,22 @@ def test_messages_api_view_passes_query_params_to_digest(client: Client, tmp_pat
     client.get(reverse('django_app.messages:messages_api') + '?mailbox=archive&unread_only=false', **_auth_header())
 
     assert fake_server.get_message_digest_calls == [{
-        'messages': None, 'folder': 'archive', 'unread_only': False, 'max_messages': 1000,
+        'messages': None, 'folder': 'archive', 'unread_only': False, 'max_messages': 200,
         'sender_search': None, 'subject_keyword': None,
         'include_response_status': False, 'stale_after_days': 3.0,
         'awaiting_your_reply_only': False, 'awaiting_their_reply_only': False,
     }]
+
+
+def test_messages_api_view_uses_configured_max_messages(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_external_api_config(tmp_path, max_messages=88)
+    _patch_sender_categorization(monkeypatch)
+    fake_server = FakeUnifiedEmailServer(authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')])
+    _patch_server(monkeypatch, fake_server)
+
+    client.get(reverse('django_app.messages:messages_api'), **_auth_header())
+
+    assert fake_server.get_message_digest_calls[0]['max_messages'] == 88
 
 
 def test_messages_api_view_passes_new_filter_params_to_digest(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

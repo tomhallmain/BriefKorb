@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QComboBox, QMessageBox, QTabWidget, QWidget,
     QCheckBox, QListWidget, QListWidgetItem, QFileDialog,
-    QTextEdit, QGroupBox, QFormLayout
+    QTextEdit, QGroupBox, QFormLayout, QSpinBox
 )
 from PySide6.QtCore import Qt, QUrl, QTimer
 from PySide6.QtGui import QDesktopServices
@@ -217,7 +217,11 @@ class AuthSettingsDialog(QDialog):
         self.log_level = QComboBox()
         self.log_level.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
         form.addRow("Log Level:", self.log_level)
-        
+
+        self.max_messages = QSpinBox()
+        self.max_messages.setRange(1, 10000)
+        form.addRow("Max Messages:", self.max_messages)
+
         layout.addLayout(form)
         layout.addStretch()
         
@@ -312,6 +316,7 @@ class AuthSettingsDialog(QDialog):
         index = self.log_level.findText(self.config.log_level.upper())
         if index >= 0:
             self.log_level.setCurrentIndex(index)
+        self.max_messages.setValue(self.config.max_messages)
     
     def _get_selected_scopes(self, scope_list: QListWidget) -> list[str]:
         """Get selected scopes from list widget"""
@@ -360,6 +365,7 @@ class AuthSettingsDialog(QDialog):
             # Update general settings
             self.config.token_storage_path = self.token_storage_path.text().strip() or "tokens"
             self.config.log_level = self.log_level.currentText().lower()
+            self.config.max_messages = self.max_messages.value()
             
             # Validate
             try:

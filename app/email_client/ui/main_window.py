@@ -642,9 +642,17 @@ class MainWindow(SmartMainWindow):
             self.worker_thread.wait()
         
         self.worker_thread = EmailWorkerThread(self.server, provider_name=provider_name)
+        self.worker_thread.max_messages = self._effective_max_messages()
         self.worker_thread.messages_loaded.connect(self._on_messages_loaded)
         self.worker_thread.error_occurred.connect(self._on_load_error)
         self.worker_thread.start()
+
+    def _effective_max_messages(self) -> int:
+        """The configured fetch cap, read fresh each call so a Settings
+        change takes effect on the very next load without needing a
+        restart. Falls back to DEFAULT_MAX_MESSAGES if config hasn't
+        loaded yet (e.g. config.yaml is missing)."""
+        return self.config.max_messages if self.config else DEFAULT_MAX_MESSAGES
     
     def _on_messages_loaded(self, messages: List[EmailMessage]):
         """Handle messages loaded from worker thread"""
@@ -1242,10 +1250,10 @@ class MainWindow(SmartMainWindow):
 
         Reuses the normal refresh path (_load_messages()) -- a full
         re-fetch naturally pulls in whatever's next in the mailbox up to
-        the same DEFAULT_MAX_MESSAGES cap, so no new provider-side "give me
-        more from this sender" capability is needed here.
+        the same configured cap, so no new provider-side "give me more
+        from this sender" capability is needed here.
         """
-        if len(self.current_messages) < DEFAULT_MAX_MESSAGES:
+        if len(self.current_messages) < self._effective_max_messages():
             self.statusBar.showMessage("Backfilling message list...")
             self._load_messages()
 

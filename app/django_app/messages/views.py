@@ -201,7 +201,7 @@ def messages_view(request, low_impact_only: bool = False):
 
         # Fetch fresh for display -- reflects any action just performed above,
         # or is simply the normal display fetch if this was a GET/filter-only request.
-        messages = server.get_user_messages(folder=mailbox, unread_only=exclude_read, max_messages=1000)
+        messages = server.get_user_messages(folder=mailbox, unread_only=exclude_read, max_messages=config.max_messages)
         message_data = server.get_message_digest(messages=messages)
         message_data = annotate_sender_impact(message_data, sender_categorization)
         if low_impact_only:
@@ -377,7 +377,7 @@ def messages_api_view(request):
 
     try:
         message_data = server.get_message_digest(
-            folder=mailbox, unread_only=unread_only, max_messages=1000,
+            folder=mailbox, unread_only=unread_only, max_messages=config.max_messages,
             sender_search=sender_search, subject_keyword=subject_keyword,
             include_response_status=include_response_status,
             stale_after_days=stale_after_days,
@@ -442,7 +442,7 @@ def inbox_view(request):
                 selected_buckets = _resolve_selected_buckets(server, mailbox, [sender_key])
                 _perform_bulk_action(request, server, action, selected_buckets)
 
-        messages = server.get_user_messages(folder=mailbox, unread_only=unread_only, max_messages=1000)
+        messages = server.get_user_messages(folder=mailbox, unread_only=unread_only, max_messages=config.max_messages)
         message_data = server.get_message_digest(messages=messages)
         message_data = annotate_sender_impact(message_data, sender_categorization)
         # Confirmed low-impact senders (subscriptions, ads, etc.) are hidden

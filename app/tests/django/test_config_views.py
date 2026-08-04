@@ -46,6 +46,7 @@ def test_settings_view_get_with_no_config_shows_defaults(client: Client) -> None
     assert response.status_code == 200
     assert response.context['config'].microsoft.enabled is False
     assert response.context['config'].gmail.enabled is False
+    assert response.context['config'].max_messages == 200
     assert response.context['ms_current_scopes'] == set()
     assert response.context['ms_auth_user'] is None
     assert response.context['gmail_auth_user'] is None
@@ -121,6 +122,36 @@ def test_settings_view_post_invalid_log_level_falls_back_to_info(client: Client,
 
     saved = _read_saved_config()
     assert saved.log_level == 'info'
+
+
+def test_settings_view_post_saves_max_messages(client: Client, tmp_path: Path) -> None:
+    client.post(reverse('django_app.config:settings'), {
+        'max_messages': '350',
+        'token_storage_path': str(tmp_path / 'tokens'),
+    })
+
+    saved = _read_saved_config()
+    assert saved.max_messages == 350
+
+
+def test_settings_view_post_invalid_max_messages_keeps_existing_value(client: Client, tmp_path: Path) -> None:
+    client.post(reverse('django_app.config:settings'), {
+        'max_messages': 'not-a-number',
+        'token_storage_path': str(tmp_path / 'tokens'),
+    })
+
+    saved = _read_saved_config()
+    assert saved.max_messages == 200  # no config.yaml existed yet, so this is the dataclass default
+
+
+def test_settings_view_post_max_messages_clamped_to_minimum_of_one(client: Client, tmp_path: Path) -> None:
+    client.post(reverse('django_app.config:settings'), {
+        'max_messages': '-5',
+        'token_storage_path': str(tmp_path / 'tokens'),
+    })
+
+    saved = _read_saved_config()
+    assert saved.max_messages == 1
 
 
 def test_settings_view_post_reports_error_when_save_fails(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

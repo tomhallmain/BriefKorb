@@ -31,8 +31,45 @@ pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QMessageBox  # noqa: E402
 
 from email_client.utils.workers import DEFAULT_MAX_MESSAGES  # noqa: E402
+from email_server.config import EmailServerConfig, ProviderConfig  # noqa: E402
 
 from helpers import make_group  # noqa: E402
+
+
+def test_effective_max_messages_falls_back_to_default_when_config_not_loaded(window):
+    assert window.config is None  # the `window` fixture stubs _load_config() to a no-op
+    assert window._effective_max_messages() == DEFAULT_MAX_MESSAGES
+
+
+def test_effective_max_messages_reads_configured_value(window):
+    window.config = EmailServerConfig(
+        microsoft=ProviderConfig(enabled=True), gmail=ProviderConfig(enabled=False),
+        max_messages=42,
+    )
+
+    assert window._effective_max_messages() == 42
+
+
+def test_backfill_uses_configured_max_messages_instead_of_default(window, monkeypatch):
+    """The same scenario as test_backfill_does_not_reload_when_at_limit, but
+    with a configured cap well below DEFAULT_MAX_MESSAGES -- the backfill
+    threshold must track the configured value, not the hardcoded constant."""
+    window.config = EmailServerConfig(
+        microsoft=ProviderConfig(enabled=True), gmail=ProviderConfig(enabled=False),
+        max_messages=5,
+    )
+    window.current_messages = [object()] * 5
+    calls = []
+    monkeypatch.setattr(window, "_load_messages", lambda: calls.append(1))
+
+    window._backfill_messages_if_below_limit()
+
+    assert calls == []
+
+    window.current_messages = [object()] * 4
+    window._backfill_messages_if_below_limit()
+
+    assert calls == [1]
 
 
 def test_backfill_triggers_reload_when_below_limit(window, monkeypatch):

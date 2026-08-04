@@ -89,6 +89,10 @@ def settings_view(request):
                 log_level = 'INFO'
             config.token_storage_path = post.get('token_storage_path', 'tokens').strip() or 'tokens'
             config.log_level = log_level.lower()
+            try:
+                config.max_messages = max(1, int(post.get('max_messages', config.max_messages)))
+            except ValueError:
+                pass
 
             config.save(str(config_path))
             django_messages.success(request, 'Settings saved successfully.')

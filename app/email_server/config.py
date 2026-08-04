@@ -53,6 +53,7 @@ class EmailServerConfig:
     gmail: ProviderConfig
     token_storage_path: str = "tokens"
     log_level: str = "INFO"
+    max_messages: int = 200
     external_api: ExternalApiConfig = field(default_factory=ExternalApiConfig)
 
     @classmethod
@@ -71,6 +72,7 @@ class EmailServerConfig:
             gmail=ProviderConfig(**config_dict.get('gmail', {})),
             token_storage_path=config_dict.get('token_storage_path', 'tokens'),
             log_level=config_dict.get('log_level', 'INFO'),
+            max_messages=config_dict.get('max_messages', 200),
             external_api=external_api,
         )
     
@@ -129,6 +131,7 @@ class EmailServerConfig:
             },
             'token_storage_path': self.token_storage_path,
             'log_level': self.log_level,
+            'max_messages': self.max_messages,
             'external_api': {
                 'enabled': self.external_api.enabled,
                 'tokens': [
@@ -156,7 +159,10 @@ class EmailServerConfig:
         if self.gmail.enabled:
             if not all([self.gmail.credentials_path, self.gmail.redirect_uri]):
                 raise ValueError("Gmail provider requires credentials_path and redirect_uri")
-        
+
+        if self.max_messages < 1:
+            raise ValueError("max_messages must be at least 1")
+
         # Ensure token storage directory exists
         Path(self.token_storage_path).mkdir(parents=True, exist_ok=True)
         

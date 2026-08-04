@@ -31,6 +31,9 @@ gmail:
 # General settings
 token_storage_path: "tokens"
 log_level: "INFO"
+# Cap on how many messages a single fetch/display pulls in at once (desktop
+# client's inbox load, web app's message list/inbox views).
+max_messages: 200
 
 # External read-only API settings. Disabled by default. Each entry in
 # `tokens` authorizes one external consumer to call BriefKorb's
