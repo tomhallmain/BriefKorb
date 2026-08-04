@@ -304,6 +304,10 @@ class MainWindow(SmartMainWindow):
         header_layout = QHBoxLayout()
         self.subject_label = QLabel("Select a message group to view")
         self.subject_label.setFont(QFont("Arial", 12, QFont.Bold))
+        # Long subjects must not drive the header/window width, matching the
+        # same fix already applied to metadata_label and message_list below.
+        self.subject_label.setWordWrap(True)
+        self.subject_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         header_layout.addWidget(self.subject_label)
         header_layout.addStretch()
         
