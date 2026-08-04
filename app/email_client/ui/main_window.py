@@ -906,6 +906,21 @@ class MainWindow(SmartMainWindow):
                 return i
         return None
     
+    def _refresh_metadata_label(self, message, group: MessageGroup):
+        """Update the metadata label (including read/unread status) in place.
+
+        Split out from _display_current_message so read/unread changes can be
+        reflected without re-triggering a full body reload for content that
+        hasn't actually changed.
+        """
+        metadata = f"From: {message.sender}\n"
+        metadata += f"To: {', '.join(message.recipients)}\n"
+        metadata += f"Date: {message.received_date.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        metadata += f"Provider: {message.provider}\n"
+        metadata += f"Status: {'Read' if message.is_read else 'Unread'}\n"
+        metadata += f"Group: {group.count} messages from {group.display_name}"
+        self.metadata_label.setText(metadata)
+
     def _display_current_message(self):
         """Display the current message from the current group"""
         if self.current_group_index is None or self.current_group_index >= len(self.current_groups):
@@ -932,13 +947,7 @@ class MainWindow(SmartMainWindow):
         self.subject_label.setText(message.subject or "(No Subject)")
         
         # Update metadata
-        metadata = f"From: {message.sender}\n"
-        metadata += f"To: {', '.join(message.recipients)}\n"
-        metadata += f"Date: {message.received_date.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        metadata += f"Provider: {message.provider}\n"
-        metadata += f"Status: {'Read' if message.is_read else 'Unread'}\n"
-        metadata += f"Group: {group.count} messages from {group.display_name}"
-        self.metadata_label.setText(metadata)
+        self._refresh_metadata_label(message, group)
         
         # Enable action buttons immediately — the user can already judge what
         # they want to do from the sender details shown above.
@@ -961,6 +970,16 @@ class MainWindow(SmartMainWindow):
                 self.delete_btn.setToolTip("")
         else:
             self.delete_btn.setEnabled(True)
+
+        # If this is the same message object already shown (e.g. a
+        # redundant redisplay after mark-as-read mutated it in place rather
+        # than an actual navigation to different content), the body panel is
+        # already correct or already loading -- don't clear it and restart
+        # the worker thread for nothing. Header/nav/metadata above are cheap
+        # and were already refreshed unconditionally, so this is safe even
+        # if only e.g. is_read changed.
+        if getattr(self, 'current_selected_message', None) is message:
+            return
 
         self.current_selected_message = message
 
@@ -1120,8 +1139,9 @@ class MainWindow(SmartMainWindow):
                 message.is_read = True
                 # Update the group's unread count
                 if self.current_group_index is not None:
-                    group = self.current_groups[self.current_group_index]
-                    # Refresh the display
+                    # Refresh the list and status text; _display_current_message
+                    # detects this is the same message object and skips
+                    # re-triggering a body reload for content that hasn't changed.
                     self._update_message_list()
                     self._display_current_message()
                 self.statusBar.showMessage("Message marked as read")
@@ -1178,6 +1198,9 @@ class MainWindow(SmartMainWindow):
         self._update_message_list()
         selected_group_index = self._find_group_index(group)
         if self.current_group_index is not None and selected_group_index == self.current_group_index:
+            # _display_current_message detects this is the same message
+            # object and skips re-triggering a body reload for content that
+            # hasn't changed.
             self._display_current_message()
         if failed:
             self.statusBar.showMessage(f"Marked {len(unread) - failed}/{len(unread)} messages as read")
