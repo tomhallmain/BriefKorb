@@ -412,6 +412,14 @@ class MainWindow(SmartMainWindow):
         self.message_body.setPlaceholderText("Message content will appear here")
         self.message_body.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         self.message_body.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        # Word-wrapped QTextDocuments recompute their entire layout on every
+        # width change, i.e. on every pixel of an interactive window resize
+        # drag -- a plausible source of the resize-hang reports, especially
+        # for image-heavy messages. NoWrap makes line breaks independent of
+        # viewport width, so resizing the window no longer reflows the
+        # document at all; wide content scrolls horizontally instead (the
+        # scrollbar policy above already accounted for that case).
+        self.message_body.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         # Enable external resource loading for images
         # Set base URL to allow relative image paths
         self.message_body.document().setMetaInformation(
