@@ -8,6 +8,8 @@ import base64
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import parsedate_to_datetime
+import httplib2
+from google_auth_httplib2 import AuthorizedHttp
 from googleapiclient.discovery import build
 from ... import EmailProvider, EmailMessage
 from ...auth.gmail import GmailOAuth
@@ -17,6 +19,17 @@ from ...utils.datetime_compat import normalize_received_at_utc
 
 # Set up logger
 logger = setup_logger('email_server.providers.gmail')
+
+# googleapiclient's build() has no timeout= of its own; this is applied
+# to the underlying httplib2 transport via AuthorizedHttp so a stalled
+# Gmail call cannot hang get_messages() indefinitely.
+GMAIL_REQUEST_TIMEOUT_SECONDS = 30
+# Gmail's batch endpoint rejects more than 100 calls in one request.
+GMAIL_BATCH_SIZE = 100
+# Metadata-only batches stay smaller -- Gmail still treats each batched
+# .get() as a concurrent request, and 100-wide full fetches 429'd.
+GMAIL_METADATA_BATCH_SIZE = 20
+GMAIL_METADATA_HEADERS = ['Subject', 'From', 'To', 'Date']
 
 class GmailProvider(EmailProvider):
     """Gmail API provider implementation"""
@@ -72,7 +85,10 @@ class GmailProvider(EmailProvider):
             # Store in instance for backward compatibility
             self._user_info = user_info
             
-            # Build credentials for Gmail service
+            # Build credentials for Gmail service. build() cannot take both
+            # credentials= and http=, so wrap creds in an AuthorizedHttp
+            # with an explicit socket timeout instead of leaving the
+            # transport unbounded.
             from google.oauth2.credentials import Credentials
             from googleapiclient.discovery import build
             creds = Credentials(
@@ -83,7 +99,10 @@ class GmailProvider(EmailProvider):
                 client_secret=token_data.get('client_secret'),
                 scopes=token_data['scopes']
             )
-            self._service = build('gmail', 'v1', credentials=creds)
+            authorized_http = AuthorizedHttp(
+                creds, http=httplib2.Http(timeout=GMAIL_REQUEST_TIMEOUT_SECONDS),
+            )
+            self._service = build('gmail', 'v1', http=authorized_http)
             logger.debug(f"Successfully authenticated user {user_id}")
             return True
         except Exception as e:
@@ -91,9 +110,11 @@ class GmailProvider(EmailProvider):
             return False
     
     def _parse_message_response(self, message: Dict) -> EmailMessage:
-        """Parse a Gmail API 'full' format message resource into an
-        EmailMessage. Pure parsing, no API call -- shared by get_messages()'s
-        per-message loop and get_message()'s single-message fetch.
+        """Parse a Gmail API message resource into an EmailMessage. Pure
+        parsing, no API call -- shared by get_messages()'s batch callback
+        (format='full' or format='metadata') and get_message()'s
+        single-message fetch. Metadata resources have headers but no body
+        parts, so body is ''.
         """
         headers = message['payload']['headers']
         subject = next((h['value'] for h in headers if h['name'] == 'Subject'), '(No Subject)')
@@ -160,7 +181,8 @@ class GmailProvider(EmailProvider):
                     user_id: str,
                     folder: str = 'inbox',
                     max_messages: int = 100,
-                    unread_only: bool = False) -> List[EmailMessage]:
+                    unread_only: bool = False,
+                    include_body: bool = True) -> List[EmailMessage]:
         """Get messages from the specified folder"""
         if not self._service:
             if not self.authenticate(user_id):
@@ -178,14 +200,38 @@ class GmailProvider(EmailProvider):
                 maxResults=max_messages
             ).execute()
 
-            messages = []
-            for msg in results.get('messages', []):
-                message = self._service.users().messages().get(
-                    userId='me',
-                    id=msg['id'],
-                    format='full'
-                ).execute()
-                messages.append(self._parse_message_response(message))
+            # Gmail's list endpoint returns ids only, so each message still
+            # needs a .get() -- but format='metadata' skips the body, which
+            # is what get_message_digest() actually wants. Don't thread the
+            # shared httplib2 transport; batch instead.
+            messages: List[EmailMessage] = []
+
+            def _collect(request_id: str, response: Dict, exception: Optional[Exception]) -> None:
+                if exception is not None:
+                    logger.warning(f"Failed to fetch message {request_id}: {exception}")
+                    return
+                try:
+                    messages.append(self._parse_message_response(response))
+                except Exception as parse_error:
+                    logger.warning(f"Failed to parse message {request_id}: {parse_error}")
+
+            message_ids = [msg['id'] for msg in results.get('messages', [])]
+            batch_size = GMAIL_BATCH_SIZE if include_body else GMAIL_METADATA_BATCH_SIZE
+            for i in range(0, len(message_ids), batch_size):
+                chunk = message_ids[i:i + batch_size]
+                batch = self._service.new_batch_http_request(callback=_collect)
+                for msg_id in chunk:
+                    if include_body:
+                        request = self._service.users().messages().get(
+                            userId='me', id=msg_id, format='full',
+                        )
+                    else:
+                        request = self._service.users().messages().get(
+                            userId='me', id=msg_id, format='metadata',
+                            metadataHeaders=GMAIL_METADATA_HEADERS,
+                        )
+                    batch.add(request, request_id=msg_id)
+                batch.execute()
 
             logger.info(f"Retrieved {len(messages)} messages from {folder} for user {user_id}")
             return messages

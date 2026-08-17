@@ -11,15 +11,19 @@ from dateutil import parser
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import sys
+import time
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from email_server import UnifiedEmailServer
 from email_server.config import EmailServerConfig
 from email_server.blocked_sender_tracking import MAX_TRACKED_SUBJECTS
+from email_server.utils.logger import setup_logger
 from email_client.utils.sender_categorization import ImpactLevel, SenderCategorizationManager
 from .services import annotate_sender_impact
 from django_app.authentication import require_external_api_token
+
+logger = setup_logger('django_app.messages')
 
 
 def _resolve_selected_buckets(
@@ -337,10 +341,12 @@ def messages_api_view(request):
     Cost note for callers: each call is one or more live Graph/Gmail API
     fetches against BriefKorb's own token quota, not a cheap local/cached
     query. Poll infrequently -- on the order of hours, not per-page-load.
-    Requesting `awaitingYourReply`/`awaitingTheirReply` (or passing
-    `includeResponseStatus`) adds a second live fetch of every provider's
-    Sent folder -- roughly doubles the cost of the call, so only ask for
-    it when the signal is actually needed.
+    The digest is metadata-only (subject, sender, timestamp, read state)
+    -- message bodies are not fetched. Requesting `awaitingYourReply`/
+    `awaitingTheirReply` (or passing `includeResponseStatus`) adds a
+    second live metadata fetch of every provider's Sent folder -- roughly
+    doubles the cost of the call, so only ask for it when the signal is
+    actually needed.
 
     Optional query params beyond `mailbox`/`unread_only`/`high_impact_only`:
     - `senderSearch`: case-insensitive substring match against a sender's
@@ -375,6 +381,11 @@ def messages_api_view(request):
     awaiting_their_reply_only = _parse_bool_param(request, 'awaitingTheirReply', default=False)
     stale_after_days = _parse_float_param(request, 'staleAfterDays', default=3.0)
 
+    logger.info(
+        f"GET /api/messages mailbox={mailbox} unread_only={unread_only} "
+        f"high_impact_only={high_impact_only}"
+    )
+    started = time.monotonic()
     try:
         message_data = server.get_message_digest(
             folder=mailbox, unread_only=unread_only, max_messages=config.max_messages,
@@ -387,6 +398,7 @@ def messages_api_view(request):
         sender_categorization = SenderCategorizationManager(config.token_storage_path)
         message_data = annotate_sender_impact(message_data, sender_categorization)
     except Exception as e:
+        logger.error(f"GET /api/messages failed after {time.monotonic() - started:.1f}s: {e}")
         return JsonResponse({'error': str(e)}, status=502)
 
     if high_impact_only:
@@ -395,6 +407,10 @@ def messages_api_view(request):
             if msg_info.get('impact') == ImpactLevel.HIGH_IMPACT.value
         ]
 
+    logger.info(
+        f"GET /api/messages returned {len(message_data)} sender bucket(s) "
+        f"in {time.monotonic() - started:.1f}s"
+    )
     return JsonResponse({'messages': message_data})
 
 

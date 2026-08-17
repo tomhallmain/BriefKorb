@@ -4,10 +4,11 @@
 Credentials`` / ``from googleapiclient.discovery import build`` inside the
 method body (shadowing the module-level ``build`` import), so those names
 must be patched on the real third-party modules -- patching
-``providers.gmail.gmail.build`` would not reach the local import. All other
-methods (``get_messages`` etc.) operate purely on ``self._service``, so
-those tests skip ``authenticate()`` entirely by assigning a fake service
-directly.
+``providers.gmail.gmail.build`` would not reach the local import.
+``httplib2`` / ``AuthorizedHttp`` are module-level imports and can be
+patched on the gmail module itself. All other methods (``get_messages``
+etc.) operate purely on ``self._service``, so those tests skip
+``authenticate()`` entirely by assigning a fake service directly.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from googleapiclient import discovery as googleapiclient_discovery_module
 import google.oauth2.credentials as google_credentials_module
 
 from email_server.auth import TokenManager
+from email_server.providers.gmail import gmail as gmail_provider_module
 from email_server.providers.gmail.gmail import GmailProvider
 
 
@@ -41,6 +43,12 @@ class _Execable:
         self._result = result
 
     def execute(self) -> Any:
+        # Defer missing-id / error results until execute() so batch.add()
+        # can collect requests the same way googleapiclient does -- the
+        # HTTP call happens at execute-time, not when the request object
+        # is constructed.
+        if isinstance(self._result, BaseException):
+            raise self._result
         return self._result
 
 
@@ -58,8 +66,13 @@ class FakeMessagesResource:
         self.list_calls.append({'userId': userId, 'q': q, 'maxResults': maxResults})
         return _Execable(self.list_results)
 
-    def get(self, userId: str, id: str, format: Optional[str] = None) -> _Execable:
-        self.get_calls.append({'userId': userId, 'id': id, 'format': format})
+    def get(self, userId: str, id: str, format: Optional[str] = None, metadataHeaders: Optional[List[str]] = None) -> _Execable:
+        call: Dict[str, Any] = {'userId': userId, 'id': id, 'format': format}
+        if metadataHeaders is not None:
+            call['metadataHeaders'] = metadataHeaders
+        self.get_calls.append(call)
+        if id not in self.get_results:
+            return _Execable(KeyError(id))
         return _Execable(self.get_results[id])
 
     def modify(self, userId: str, id: str, body: Dict[str, Any]) -> _Execable:
@@ -96,6 +109,24 @@ class FakeSettingsResource:
 
 
 @dataclass
+class FakeBatchHttpRequest:
+    callback: Any
+    pending: List[tuple] = field(default_factory=list)
+
+    def add(self, request: Any, request_id: Optional[str] = None) -> None:
+        self.pending.append((request_id, request))
+
+    def execute(self) -> None:
+        for request_id, request in self.pending:
+            try:
+                response = request.execute()
+            except Exception as exception:
+                self.callback(request_id, None, exception)
+            else:
+                self.callback(request_id, response, None)
+
+
+@dataclass
 class FakeGmailService:
     messages_resource: FakeMessagesResource
     settings_resource: Optional[FakeSettingsResource] = None
@@ -108,6 +139,9 @@ class FakeGmailService:
 
     def settings(self) -> FakeSettingsResource:
         return self.settings_resource
+
+    def new_batch_http_request(self, callback: Any = None) -> FakeBatchHttpRequest:
+        return FakeBatchHttpRequest(callback=callback)
 
 
 def _gmail_message(
@@ -226,6 +260,39 @@ def test_authenticate_succeeds_fetches_user_info_and_builds_service(tmp_path: Pa
     assert result is True
     assert provider._service is fake_service
     assert provider.token_manager.get_user_info('user1') == {'emailAddress': 'user@example.com'}
+
+
+def test_authenticate_builds_service_with_timed_authorized_http(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider(tmp_path)
+    stored_token = {
+        'token': 'at', 'refresh_token': 'r', 'token_uri': 'https://oauth2.googleapis.com/token',
+        'client_id': 'cid', 'client_secret': 'csecret', 'scopes': ['s'],
+    }
+    monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: stored_token)
+    monkeypatch.setattr(provider.oauth, 'get_user_info', lambda token_data: {'emailAddress': 'user@example.com'})
+    captured: Dict[str, Any] = {}
+
+    class FakeHttp:
+        def __init__(self, timeout: Any = None) -> None:
+            captured['http_timeout'] = timeout
+
+    class FakeAuthorizedHttp:
+        def __init__(self, creds: Any, http: Any = None) -> None:
+            captured['authorized_http'] = http
+
+    def fake_build(*a: Any, **k: Any) -> object:
+        captured['build_kwargs'] = k
+        return object()
+
+    monkeypatch.setattr(google_credentials_module, 'Credentials', lambda **kwargs: object())
+    monkeypatch.setattr(gmail_provider_module, 'httplib2', type('Httplib2', (), {'Http': FakeHttp}))
+    monkeypatch.setattr(gmail_provider_module, 'AuthorizedHttp', FakeAuthorizedHttp)
+    monkeypatch.setattr(googleapiclient_discovery_module, 'build', fake_build)
+
+    assert provider.authenticate('user1') is True
+    assert captured['http_timeout'] == gmail_provider_module.GMAIL_REQUEST_TIMEOUT_SECONDS
+    assert 'credentials' not in captured['build_kwargs']
+    assert 'http' in captured['build_kwargs']
 
 
 def test_authenticate_skips_user_info_fetch_when_already_cached(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -393,6 +460,49 @@ def test_get_messages_returns_empty_list_on_api_exception(tmp_path: Path) -> Non
     assert provider.get_messages('user1') == []
 
 
+def test_get_messages_skips_message_when_batch_item_fails(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    good = _gmail_message('m2', subject='Good')
+    resource = FakeMessagesResource(
+        list_results={'messages': [{'id': 'm1'}, {'id': 'm2'}]},
+        get_results={'m2': good},
+    )
+    provider._service = FakeGmailService(resource)
+
+    messages = provider.get_messages('user1')
+
+    assert [m.id for m in messages] == ['m2']
+    assert [m.subject for m in messages] == ['Good']
+
+
+def test_get_messages_without_body_uses_metadata_format(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    meta = {
+        'id': 'm1',
+        'payload': {'headers': [
+            {'name': 'Subject', 'value': 'Hello'},
+            {'name': 'From', 'value': 'alice@example.com'},
+            {'name': 'To', 'value': 'bob@example.com'},
+            {'name': 'Date', 'value': 'Mon, 01 Jan 2024 12:00:00 GMT'},
+        ]},
+        'labelIds': ['UNREAD'],
+    }
+    resource = FakeMessagesResource(
+        list_results={'messages': [{'id': 'm1'}]},
+        get_results={'m1': meta},
+    )
+    provider._service = FakeGmailService(resource)
+
+    messages = provider.get_messages('user1', include_body=False)
+
+    assert resource.get_calls[0]['format'] == 'metadata'
+    assert resource.get_calls[0]['metadataHeaders'] == gmail_provider_module.GMAIL_METADATA_HEADERS
+    assert len(messages) == 1
+    assert messages[0].subject == 'Hello'
+    assert messages[0].sender == 'alice@example.com'
+    assert messages[0].body == ''
+
+
 # --- get_message --------------------------------------------------------------
 
 def test_get_message_returns_none_when_authentication_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -421,7 +531,7 @@ def test_get_message_returns_parsed_message_with_body(tmp_path: Path) -> None:
 
 def test_get_message_returns_none_when_not_found(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
-    resource = FakeMessagesResource(get_results={})  # 'm1' not present -> KeyError inside get()
+    resource = FakeMessagesResource(get_results={})  # 'm1' not present -> KeyError inside execute()
     provider._service = FakeGmailService(resource)
 
     assert provider.get_message('user1', 'm1') is None

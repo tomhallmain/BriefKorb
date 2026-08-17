@@ -231,7 +231,7 @@ def test_get_messages_parses_html_body_sender_and_recipients(tmp_path: Path, mon
     }
     detail_response = _FakeResponse(json_data=full_msg)
 
-    def fake_get(url: str, headers: Any = None, params: Any = None) -> _FakeResponse:
+    def fake_get(url: str, headers: Any = None, params: Any = None, timeout: Any = None) -> _FakeResponse:
         return list_response if url.endswith('/messages') else detail_response
 
     monkeypatch.setattr(microsoft_provider_module.requests, 'get', fake_get)
@@ -260,7 +260,7 @@ def test_get_messages_converts_plain_text_body_to_escaped_html(tmp_path: Path, m
     }
     detail_response = _FakeResponse(json_data=full_msg)
 
-    def fake_get(url: str, headers: Any = None, params: Any = None) -> _FakeResponse:
+    def fake_get(url: str, headers: Any = None, params: Any = None, timeout: Any = None) -> _FakeResponse:
         return list_response if url.endswith('/messages') else detail_response
 
     monkeypatch.setattr(microsoft_provider_module.requests, 'get', fake_get)
@@ -282,7 +282,7 @@ def test_get_messages_falls_back_to_body_preview_when_body_missing(tmp_path: Pat
     }
     detail_response = _FakeResponse(json_data=full_msg)
 
-    def fake_get(url: str, headers: Any = None, params: Any = None) -> _FakeResponse:
+    def fake_get(url: str, headers: Any = None, params: Any = None, timeout: Any = None) -> _FakeResponse:
         return list_response if url.endswith('/messages') else detail_response
 
     monkeypatch.setattr(microsoft_provider_module.requests, 'get', fake_get)
@@ -297,7 +297,7 @@ def test_get_messages_unread_only_sets_filter_query_param(tmp_path: Path, monkey
     monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: {'access_token': 'at'})
     captured: Dict[str, Any] = {}
 
-    def fake_get(url: str, headers: Any = None, params: Any = None) -> _FakeResponse:
+    def fake_get(url: str, headers: Any = None, params: Any = None, timeout: Any = None) -> _FakeResponse:
         captured['params'] = params
         return _FakeResponse(json_data={'value': []})
 
@@ -319,7 +319,7 @@ def test_get_messages_skips_message_when_detail_fetch_fails(tmp_path: Path, monk
         'bodyPreview': 'ok',
     }
 
-    def fake_get(url: str, headers: Any = None, params: Any = None) -> _FakeResponse:
+    def fake_get(url: str, headers: Any = None, params: Any = None, timeout: Any = None) -> _FakeResponse:
         if url.endswith('/messages'):
             return list_response
         if url.endswith('/m1'):
@@ -333,11 +333,70 @@ def test_get_messages_skips_message_when_detail_fetch_fails(tmp_path: Path, monk
     assert [m.id for m in messages] == ['m2']
 
 
+def test_get_messages_passes_request_timeout_on_list_and_detail_fetches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider(tmp_path)
+    monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: {'access_token': 'at'})
+    timeouts: List[Any] = []
+    full_msg = {
+        'id': 'm1', 'subject': 'S', 'isRead': True,
+        'from': {'emailAddress': {'address': 'a@example.com'}},
+        'receivedDateTime': '2024-01-01T12:00:00Z',
+        'bodyPreview': 'ok',
+    }
+
+    def fake_get(url: str, headers: Any = None, params: Any = None, timeout: Any = None) -> _FakeResponse:
+        timeouts.append(timeout)
+        if url.endswith('/messages'):
+            return _FakeResponse(json_data={'value': [{'id': 'm1'}]})
+        return _FakeResponse(json_data=full_msg)
+
+    monkeypatch.setattr(microsoft_provider_module.requests, 'get', fake_get)
+
+    messages = provider.get_messages('user1')
+
+    assert len(messages) == 1
+    assert timeouts == [microsoft_provider_module.GRAPH_REQUEST_TIMEOUT_SECONDS] * 2
+
+
+def test_get_messages_without_body_parses_list_without_per_message_fetch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider(tmp_path)
+    monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: {'access_token': 'at'})
+    urls: List[str] = []
+    captured: Dict[str, Any] = {}
+    list_msg = {
+        'id': 'm1', 'subject': 'Hello', 'isRead': False,
+        'from': {'emailAddress': {'address': 'alice@example.com'}},
+        'toRecipients': [{'emailAddress': {'address': 'bob@example.com'}}],
+        'receivedDateTime': '2024-01-01T12:00:00Z',
+    }
+
+    def fake_get(url: str, headers: Any = None, params: Any = None, timeout: Any = None) -> _FakeResponse:
+        urls.append(url)
+        captured['params'] = params
+        captured['timeout'] = timeout
+        return _FakeResponse(json_data={'value': [list_msg]})
+
+    monkeypatch.setattr(microsoft_provider_module.requests, 'get', fake_get)
+
+    messages = provider.get_messages('user1', include_body=False)
+
+    assert len(urls) == 1
+    assert urls[0].endswith('/messages')
+    assert 'body' not in captured['params']['$select']
+    assert captured['timeout'] == microsoft_provider_module.GRAPH_REQUEST_TIMEOUT_SECONDS
+    assert len(messages) == 1
+    assert messages[0].subject == 'Hello'
+    assert messages[0].sender == 'alice@example.com'
+    assert messages[0].recipients == ['bob@example.com']
+    assert messages[0].body == ''
+    assert messages[0].is_read is False
+
+
 def test_get_messages_returns_empty_list_on_top_level_exception(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     provider = _provider(tmp_path)
     monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: {'access_token': 'at'})
 
-    def raise_get(url: str, headers: Any = None, params: Any = None) -> Any:
+    def raise_get(url: str, headers: Any = None, params: Any = None, timeout: Any = None) -> Any:
         raise RuntimeError('network down')
 
     monkeypatch.setattr(microsoft_provider_module.requests, 'get', raise_get)
@@ -366,7 +425,7 @@ def test_get_message_returns_parsed_message_with_body(tmp_path: Path, monkeypatc
     }
     captured: Dict[str, Any] = {}
 
-    def fake_get(url: str, headers: Any = None, params: Any = None) -> _FakeResponse:
+    def fake_get(url: str, headers: Any = None, params: Any = None, timeout: Any = None) -> _FakeResponse:
         captured['url'] = url
         return _FakeResponse(json_data=full_msg)
 
@@ -385,7 +444,7 @@ def test_get_message_returns_parsed_message_with_body(tmp_path: Path, monkeypatc
 def test_get_message_returns_none_when_fetch_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     provider = _provider(tmp_path)
     monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: {'access_token': 'at'})
-    monkeypatch.setattr(microsoft_provider_module.requests, 'get', lambda url, headers=None, params=None: _FakeResponse(status_code=404))
+    monkeypatch.setattr(microsoft_provider_module.requests, 'get', lambda url, headers=None, params=None, timeout=None: _FakeResponse(status_code=404))
 
     assert provider.get_message('user1', 'does-not-exist') is None
 

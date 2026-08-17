@@ -15,6 +15,10 @@ from ...utils.logger import setup_logger
 # Set up logger
 logger = setup_logger('email_server.providers.microsoft')
 
+# Bound Graph HTTP calls so a stalled response cannot hang get_messages()
+# (and thus GET /api/messages) indefinitely.
+GRAPH_REQUEST_TIMEOUT_SECONDS = 30
+
 class MicrosoftGraphProvider(EmailProvider):
     """Microsoft Graph API email provider implementation"""
 
@@ -116,10 +120,47 @@ class MicrosoftGraphProvider(EmailProvider):
         
         return response
     
+    def _parse_graph_message(self, full_msg: Dict) -> EmailMessage:
+        """Turn a Graph message resource into an EmailMessage.
+
+        Used both for a single-message GET (get_message / include_body
+        fan-out) and for parsing list-endpoint items when include_body
+        is False. Body fields are optional -- missing ones yield ''.
+        """
+        body = ''
+        if 'body' in full_msg:
+            body_content = full_msg['body']
+            body = body_content.get('content', '')
+            content_type = body_content.get('contentType', 'text')
+            if content_type == 'text':
+                body = html_escape.escape(body).replace('\n', '<br>')
+        elif 'bodyPreview' in full_msg:
+            body = html_escape.escape(full_msg['bodyPreview']).replace('\n', '<br>')
+
+        sender_info = full_msg.get('from', {})
+        sender = sender_info.get('emailAddress', {}).get('address', 'Unknown') if sender_info else 'Unknown'
+
+        recipients = []
+        if 'toRecipients' in full_msg:
+            recipients = [r.get('emailAddress', {}).get('address', '') for r in full_msg['toRecipients']]
+
+        received_date = datetime.fromisoformat(full_msg['receivedDateTime'].replace('Z', '+00:00'))
+
+        return EmailMessage(
+            id=full_msg['id'],
+            subject=full_msg.get('subject', '(No Subject)'),
+            sender=sender,
+            recipients=recipients,
+            received_date=received_date,
+            body=body,
+            is_read=full_msg.get('isRead', False),
+            provider='microsoft'
+        )
+
     def _fetch_and_parse_message(self, headers: Dict[str, str], message_id: str) -> Optional[EmailMessage]:
         """Fetch one message's full details (including body) by id and parse
         it into an EmailMessage. Returns None on any failure -- callers
-        (get_messages()'s per-message loop, get_message()) both treat a
+        (get_messages()'s per-message fan-out, get_message()) both treat a
         single unfetchable message as "skip it", not a hard error.
         """
         try:
@@ -128,51 +169,16 @@ class MicrosoftGraphProvider(EmailProvider):
                 headers=headers,
                 params={
                     '$select': 'id,subject,from,toRecipients,receivedDateTime,isRead,body,bodyPreview'
-                }
+                },
+                timeout=GRAPH_REQUEST_TIMEOUT_SECONDS,
             )
             msg_response.raise_for_status()
-            full_msg = msg_response.json()
-
-            # Extract body - prefer HTML, fallback to bodyPreview (plain text)
-            body = ''
-            if 'body' in full_msg:
-                body_content = full_msg['body']
-                body = body_content.get('content', '')
-                content_type = body_content.get('contentType', 'text')
-                # If it's plain text, convert to HTML by escaping and preserving newlines
-                if content_type == 'text':
-                    body = html_escape.escape(body).replace('\n', '<br>')
-            elif 'bodyPreview' in full_msg:
-                # Fallback to plain text preview
-                body = html_escape.escape(full_msg['bodyPreview']).replace('\n', '<br>')
-
-            # Extract sender
-            sender_info = full_msg.get('from', {})
-            sender = sender_info.get('emailAddress', {}).get('address', 'Unknown') if sender_info else 'Unknown'
-
-            # Extract recipients
-            recipients = []
-            if 'toRecipients' in full_msg:
-                recipients = [r.get('emailAddress', {}).get('address', '') for r in full_msg['toRecipients']]
-
-            # Parse date
-            received_date = datetime.fromisoformat(full_msg['receivedDateTime'].replace('Z', '+00:00'))
-
-            return EmailMessage(
-                id=full_msg['id'],
-                subject=full_msg.get('subject', '(No Subject)'),
-                sender=sender,
-                recipients=recipients,
-                received_date=received_date,
-                body=body,
-                is_read=full_msg.get('isRead', False),
-                provider='microsoft'
-            )
+            return self._parse_graph_message(msg_response.json())
         except Exception as e:
             logger.warning(f"Failed to get full message details for {message_id}: {e}")
             return None
 
-    def get_messages(self, user_id: str, folder: str = 'inbox', unread_only: bool = False, max_messages: int = 10) -> List[EmailMessage]:
+    def get_messages(self, user_id: str, folder: str = 'inbox', unread_only: bool = False, max_messages: int = 10, include_body: bool = True) -> List[EmailMessage]:
         """Get messages from specified folder
 
         Note: user_id is used to retrieve the token, but the API call uses /me
@@ -182,29 +188,50 @@ class MicrosoftGraphProvider(EmailProvider):
             headers = self._get_headers(user_id)
             filter_query = "isRead eq false" if unread_only else None
 
-            # First, get message list with basic info
+            # Metadata is available on the folder list itself. Bodies are
+            # not -- include_body still requires a per-message GET. The
+            # digest/API path passes include_body=False so one list call
+            # is the whole fetch.
+            select_fields = 'id,subject,from,toRecipients,receivedDateTime,isRead'
             response = requests.get(
                 f"{self.base_url}/me/mailFolders/{folder}/messages",
                 headers=headers,
                 params={
                     '$top': max_messages,
                     '$filter': filter_query,
-                    '$select': 'id,subject,from,receivedDateTime,isRead',
+                    '$select': select_fields,
                     '$orderby': 'receivedDateTime desc'
-                }
+                },
+                timeout=GRAPH_REQUEST_TIMEOUT_SECONDS,
             )
             if not response.ok:
                 logger.error(f"Graph API {response.status_code} response body: {response.text[:500]}")
             response.raise_for_status()
 
             message_list = response.json().get('value', [])
-            messages = []
 
-            # Fetch full message details including body for each message
-            for msg in message_list:
-                parsed = self._fetch_and_parse_message(headers, msg['id'])
-                if parsed is not None:
-                    messages.append(parsed)
+            if not include_body:
+                messages = []
+                for msg in message_list:
+                    try:
+                        messages.append(self._parse_graph_message(msg))
+                    except Exception as e:
+                        logger.warning(f"Failed to parse message {msg.get('id')}: {e}")
+                logger.info(f"Retrieved {len(messages)} messages from {folder} for user {user_id}")
+                return messages
+
+            messages = []
+            if message_list:
+                with ThreadPoolExecutor(max_workers=min(10, len(message_list))) as executor:
+                    futures: List[Future[Optional[EmailMessage]]] = [
+                        executor.submit(self._fetch_and_parse_message, headers, msg['id'])
+                        for msg in message_list
+                    ]
+                    wait(futures)
+                for future in futures:
+                    parsed = future.result()
+                    if parsed is not None:
+                        messages.append(parsed)
 
             logger.info(f"Retrieved {len(messages)} messages from {folder} for user {user_id}")
             return messages

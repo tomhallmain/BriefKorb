@@ -79,8 +79,14 @@ class EmailProvider(ABC):
                     user_id: str,
                     folder: str = 'inbox',
                     max_messages: int = 100,
-                    unread_only: bool = False) -> List[EmailMessage]:
-        """Get messages from the specified folder for a user"""
+                    unread_only: bool = False,
+                    include_body: bool = True) -> List[EmailMessage]:
+        """Get messages from the specified folder for a user.
+
+        `include_body=False` returns metadata only (id, subject, sender,
+        date, read state) -- used by get_message_digest(), which never
+        reads bodies. Desktop/web list fetches leave this True.
+        """
         pass
 
     @abstractmethod
@@ -296,7 +302,8 @@ class UnifiedEmailServer:
                          providers: Optional[Union[EmailProvider, List[EmailProvider], List[AuthenticatedProvider]]] = None,
                          folder: str = 'inbox',
                          max_messages: int = 100,
-                         unread_only: bool = False) -> List[EmailMessage]:
+                         unread_only: bool = False,
+                         include_body: bool = True) -> List[EmailMessage]:
         """Get messages from specified providers or all authenticated providers
         
         Args:
@@ -305,6 +312,10 @@ class UnifiedEmailServer:
                 - EmailProvider instance: Use this provider (must be authenticated)
                 - List[EmailProvider]: Use these providers
                 - List[AuthenticatedProvider]: Use these authenticated provider+user combinations
+            include_body: When False, providers skip per-message body
+                fetches and return metadata only. Default True so desktop
+                and HTML clients that still read `.body` from the list
+                fetch are unchanged.
         """
         messages = []
         
@@ -361,7 +372,8 @@ class UnifiedEmailServer:
                     user_id=auth_prov.user_id,
                     folder=folder,
                     max_messages=max_messages,
-                    unread_only=unread_only
+                    unread_only=unread_only,
+                    include_body=include_body,
                 )
                 messages.extend(provider_messages)
                 logger.info(f"Retrieved {len(provider_messages)} messages from {auth_prov.provider_name} for user {auth_prov.user_id}")
@@ -384,7 +396,8 @@ class UnifiedEmailServer:
         'sentitems', Gmail's search-operator name is 'sent'), so each
         provider resolves its own via its SENT_FOLDER class attribute.
         Used by get_message_digest()'s response-status tracking (has the
-        user replied to a given sender yet?).
+        user replied to a given sender yet?), which only needs sender and
+        timestamp -- so this fetch is metadata-only.
         """
         messages: List[EmailMessage] = []
         for auth_prov in self.get_authenticated_providers():
@@ -395,6 +408,7 @@ class UnifiedEmailServer:
                     folder=sent_folder,
                     max_messages=max_messages,
                     unread_only=False,
+                    include_body=False,
                 )
                 messages.extend(provider_messages)
                 logger.info(f"Retrieved {len(provider_messages)} sent messages from {auth_prov.provider_name} for user {auth_prov.user_id}")
@@ -434,6 +448,11 @@ class UnifiedEmailServer:
         message-reading view, entity extraction) and shouldn't pay for two
         live fetches in one request.
 
+        When this method fetches for itself (the external API path), it
+        requests metadata only -- the digest never reads message bodies.
+        Desktop/HTML callers that pass `messages=` keep whatever they
+        already fetched, including bodies.
+
         `subject_keyword` filters the raw message list (case-insensitive
         substring match on subject) *before* aggregation, so counts and the
         representative subject/timestamp naturally reflect only matching
@@ -464,7 +483,10 @@ class UnifiedEmailServer:
         django_app.messages.services.annotate_sender_impact).
         """
         if messages is None:
-            messages = self.get_user_messages(folder=folder, unread_only=unread_only, max_messages=max_messages)
+            messages = self.get_user_messages(
+                folder=folder, unread_only=unread_only, max_messages=max_messages,
+                include_body=False,
+            )
 
         if subject_keyword:
             keyword_lower = subject_keyword.lower()

@@ -266,6 +266,19 @@ def test_get_user_messages_uses_all_authenticated_providers_by_default(tmp_path:
     assert [m.id for m in result] == ['m2', 'm1']  # newest first
 
 
+def test_get_user_messages_defaults_to_including_body(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    provider = server.get_provider('microsoft')
+    server.token_manager.store_token('user1', {'access_token': 'at'})
+    monkeypatch.setattr(provider, 'authenticate', lambda user_id: True)
+    captured: Dict[str, Any] = {}
+    monkeypatch.setattr(provider, 'get_messages', lambda **kwargs: captured.update(kwargs) or [])
+
+    server.get_user_messages()
+
+    assert captured['include_body'] is True
+
+
 def test_get_user_messages_with_single_provider_instance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     server = _server(tmp_path)
     provider = server.get_provider('microsoft')
@@ -346,6 +359,7 @@ def test_get_sent_messages_uses_provider_specific_sent_folder(tmp_path: Path, mo
 
     assert captured['folder'] == 'sentitems'
     assert captured['unread_only'] is False
+    assert captured['include_body'] is False
 
 
 def test_get_sent_messages_merges_multiple_providers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -705,6 +719,7 @@ def test_get_message_digest_passes_through_folder_unread_only_and_max_messages(t
     assert captured['folder'] == 'archive'
     assert captured['unread_only'] is False
     assert captured['max_messages'] == 50
+    assert captured['include_body'] is False
 
 
 def test_get_message_digest_aggregates_from_given_messages_without_fetching(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
