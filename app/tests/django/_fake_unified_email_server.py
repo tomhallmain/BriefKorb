@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from django_app.messages import views as messages_views_module
+from email_server import ScourResult
 
 
 @dataclass
@@ -37,6 +38,7 @@ class FakeUnifiedEmailServer:
         delete_result: bool = True,
         block_result: bool = True,
         blocked_sender_summary: Optional[List[Dict[str, Any]]] = None,
+        scour_result: Optional[ScourResult] = None,
     ) -> None:
         self._authenticated_providers = authenticated_providers if authenticated_providers is not None else []
         self._messages = messages if messages is not None else []
@@ -49,6 +51,7 @@ class FakeUnifiedEmailServer:
         self._delete_result = delete_result
         self._block_result = block_result
         self._blocked_sender_summary = blocked_sender_summary if blocked_sender_summary is not None else []
+        self._scour_result = scour_result if scour_result is not None else ScourResult()
 
         self.get_user_messages_calls: List[Dict[str, Any]] = []
         self.get_message_digest_calls: List[Dict[str, Any]] = []
@@ -59,6 +62,7 @@ class FakeUnifiedEmailServer:
         self.block_senders_calls: List[Dict[str, Any]] = []
         self.unblock_sender_calls: List[str] = []
         self.ignore_status_calls: List[Dict[str, Any]] = []
+        self.scour_calls: List[Dict[str, Any]] = []
 
     def get_authenticated_providers(self, provider_name: Optional[str] = None) -> List[FakeAuthenticatedProvider]:
         if provider_name is None:
@@ -128,6 +132,11 @@ class FakeUnifiedEmailServer:
 
     def unignore_messages(self, provider_name: str, message_ids: List[str]) -> None:
         self.ignore_status_calls.append({'action': 'unignore', 'provider_name': provider_name, 'message_ids': message_ids})
+
+
+    def scour_unread_messages(self, **kwargs: Any) -> ScourResult:
+        self.scour_calls.append(kwargs)
+        return self._scour_result
 
 
 def patch_server(monkeypatch: pytest.MonkeyPatch, fake_server: FakeUnifiedEmailServer) -> None:

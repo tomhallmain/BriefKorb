@@ -55,6 +55,9 @@ class _Execable:
 @dataclass
 class FakeMessagesResource:
     list_results: Dict[str, Any] = field(default_factory=dict)
+    # When set, list() serves these by pageToken (None for the first page)
+    # instead of list_results.
+    list_pages: Optional[Dict[Optional[str], Dict[str, Any]]] = None
     get_results: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     list_calls: List[Dict[str, Any]] = field(default_factory=list)
     get_calls: List[Dict[str, Any]] = field(default_factory=list)
@@ -62,8 +65,10 @@ class FakeMessagesResource:
     trash_calls: List[str] = field(default_factory=list)
     send_calls: List[Dict[str, Any]] = field(default_factory=list)
 
-    def list(self, userId: str, q: Optional[str] = None, maxResults: Optional[int] = None) -> _Execable:
-        self.list_calls.append({'userId': userId, 'q': q, 'maxResults': maxResults})
+    def list(self, userId: str, q: Optional[str] = None, maxResults: Optional[int] = None, pageToken: Optional[str] = None) -> _Execable:
+        self.list_calls.append({'userId': userId, 'q': q, 'maxResults': maxResults, 'pageToken': pageToken})
+        if self.list_pages is not None:
+            return _Execable(self.list_pages[pageToken])
         return _Execable(self.list_results)
 
     def get(self, userId: str, id: str, format: Optional[str] = None, metadataHeaders: Optional[List[str]] = None) -> _Execable:
@@ -679,3 +684,72 @@ def test_block_senders_returns_empty_list_on_api_exception(tmp_path: Path) -> No
     provider._service = _ExplodingService()
 
     assert provider.block_senders('user1', ['a@example.com']) == []
+
+
+# --- get_messages_page ---------------------------------------------------------
+
+def test_get_messages_page_passes_page_token_and_returns_next(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    resource = FakeMessagesResource(
+        list_pages={
+            None: {'messages': [{'id': 'm1'}], 'nextPageToken': 'tok2'},
+            'tok2': {'messages': [{'id': 'm2'}]},
+        },
+        get_results={'m1': _gmail_message('m1'), 'm2': _gmail_message('m2')},
+    )
+    provider._service = FakeGmailService(resource)
+
+    first = provider.get_messages_page('user1', page_size=1, unread_only=True)
+    second = provider.get_messages_page('user1', page_size=1, unread_only=True, page_token=first.next_page_token)
+
+    assert [m.id for m in first.messages] == ['m1']
+    assert first.next_page_token == 'tok2'
+    assert [m.id for m in second.messages] == ['m2']
+    assert second.next_page_token is None
+    assert [(c['q'], c['maxResults'], c['pageToken']) for c in resource.list_calls] == [
+        ('in:inbox is:unread', 1, None),
+        ('in:inbox is:unread', 1, 'tok2'),
+    ]
+
+
+def test_get_messages_page_skips_known_ids_without_fetching_them(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    resource = FakeMessagesResource(
+        list_results={'messages': [{'id': 'm1'}, {'id': 'm2'}]},
+        get_results={'m1': _gmail_message('m1'), 'm2': _gmail_message('m2')},
+    )
+    provider._service = FakeGmailService(resource)
+
+    page = provider.get_messages_page('user1', skip_ids={'m1'})
+
+    assert [m.id for m in page.messages] == ['m2']
+    assert page.scanned == 2
+    assert [c['id'] for c in resource.get_calls] == ['m2']
+
+
+def test_get_messages_page_ignores_oldest_first(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    resource = FakeMessagesResource(list_results={'messages': []})
+    provider._service = FakeGmailService(resource)
+
+    provider.get_messages_page('user1', oldest_first=True)
+
+    assert GmailProvider.SUPPORTS_OLDEST_FIRST is False
+    assert resource.list_calls[0]['q'] == 'in:inbox'
+
+
+def test_get_messages_page_raises_on_api_exception(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    provider._service = _ExplodingService()
+
+    with pytest.raises(Exception):
+        provider.get_messages_page('user1')
+
+
+def test_get_messages_page_raises_when_authentication_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider(tmp_path)
+    monkeypatch.setattr(provider, 'authenticate', lambda user_id: False)
+
+    with pytest.raises(RuntimeError):
+        provider.get_messages_page('user1')
+

@@ -36,7 +36,9 @@ from email_client.utils.message_grouping import (
     MessageGroup, group_messages_by_sender, merge_groups_by_domain, extract_sender_email, exclude_ignored_messages,
 )
 from email_client.utils.content_type import ContentType
-from email_client.utils.workers import EmailWorkerThread, MessageBodyWorkerThread, EntityExtractionWorkerThread, DEFAULT_MAX_MESSAGES
+from email_client.utils.workers import (
+    EmailWorkerThread, MessageBodyWorkerThread, EntityExtractionWorkerThread, ScourWorkerThread, DEFAULT_MAX_MESSAGES,
+)
 from email_client.utils.html_utils import sanitize_html, convert_plain_text_to_html, is_html_content, strip_images_for_debug
 from email_client.utils.sender_categorization import SenderCategorizationManager, ImpactLevel
 from lib.loading_spinner_qt import LoadingSpinnerBadge
@@ -79,6 +81,7 @@ class MainWindow(SmartMainWindow):
         self.worker_thread: Optional[EmailWorkerThread] = None
         self.body_worker_thread: Optional[MessageBodyWorkerThread] = None
         self.entity_extraction_worker: Optional[EntityExtractionWorkerThread] = None
+        self.scour_worker_thread: Optional[ScourWorkerThread] = None
         self.config: Optional[EmailServerConfig] = None
         self.config_path: Optional[str] = None
         self.sender_categorization: Optional[SenderCategorizationManager] = None
@@ -109,7 +112,7 @@ class MainWindow(SmartMainWindow):
         (falling back to terminate() if a worker doesn't stop promptly)
         ensures nothing is still running when the window actually closes.
         """
-        for worker in (self.worker_thread, self.body_worker_thread, self.entity_extraction_worker):
+        for worker in (self.worker_thread, self.body_worker_thread, self.entity_extraction_worker, self.scour_worker_thread):
             if worker and worker.isRunning():
                 worker.blockSignals(True)
                 worker.quit()
@@ -190,6 +193,15 @@ class MainWindow(SmartMainWindow):
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self._load_messages)
         layout.addWidget(self.refresh_btn)
+
+        self.scour_btn = QPushButton("Scour Unread")
+        self.scour_btn.setToolTip(
+            "Search further back for unread messages beyond the normal fetch limit and add them "
+            "to the list. Microsoft accounts are searched oldest-first; Gmail can only be searched "
+            "from the newest end, so it reaches as far back as the scour limits allow."
+        )
+        self.scour_btn.clicked.connect(self._scour_unread)
+        layout.addWidget(self.scour_btn)
         
         # Compose button
         self.compose_btn = QPushButton("Compose")
@@ -669,6 +681,61 @@ class MainWindow(SmartMainWindow):
         self.worker_thread.messages_loaded.connect(self._on_messages_loaded)
         self.worker_thread.error_occurred.connect(self._on_load_error)
         self.worker_thread.start()
+
+    def _scour_unread(self):
+        """Start a background scour for unread messages not already loaded."""
+        if not self.server:
+            QMessageBox.warning(self, "No Server", "Email server not initialized. Please configure settings first.")
+            return
+        if not self.server.get_authenticated_providers():
+            QMessageBox.warning(
+                self,
+                "Not Authenticated",
+                "No providers are authenticated. Please open Settings and authenticate at least one provider."
+            )
+            return
+        if self.scour_worker_thread and self.scour_worker_thread.isRunning():
+            return
+
+        provider_text = self.provider_combo.currentText()
+        provider_name = None if provider_text == "All" else provider_text.lower()
+        known_ids = {(m.provider, m.id) for m in self.current_messages}
+
+        self.scour_btn.setEnabled(False)
+        self.scour_btn.setText("Scouring...")
+        self.statusBar.showMessage("Scouring for older unread messages...")
+        self.scour_worker_thread = ScourWorkerThread(self.server, known_ids, provider_name=provider_name)
+        self.scour_worker_thread.scour_complete.connect(self._on_scour_complete)
+        self.scour_worker_thread.error_occurred.connect(self._on_scour_error)
+        self.scour_worker_thread.start()
+
+    def _on_scour_complete(self, result) -> None:
+        """Merge a ScourResult's messages into the loaded list."""
+        self.scour_btn.setEnabled(True)
+        self.scour_btn.setText("Scour Unread")
+
+        # Re-check against the list as it is now: a refresh may have
+        # finished while the scour was running.
+        loaded_ids = {(m.provider, m.id) for m in self.current_messages}
+        added = [m for m in result.messages if (m.provider, m.id) not in loaded_ids]
+        if added:
+            self.current_messages = self.current_messages + added
+            self._sender_groups = group_messages_by_sender(self.current_messages)
+            if self.sender_categorization:
+                self.sender_categorization.infer_and_store_groups(self._sender_groups)
+            self._refresh_groups_keeping_selection()
+
+        summary = f"Scour added {len(added)} unread message(s) ({result.scanned} scanned)."
+        if result.stopped_early:
+            summary += " Stopped at the scour limit before reaching the end of the mailbox."
+        if result.errors:
+            summary += f" Failed for: {'; '.join(result.errors)}"
+        self.statusBar.showMessage(summary)
+
+    def _on_scour_error(self, error: str) -> None:
+        self.scour_btn.setEnabled(True)
+        self.scour_btn.setText("Scour Unread")
+        self.statusBar.showMessage(f"Scour failed: {error}")
 
     def _effective_max_messages(self) -> int:
         """The configured fetch cap, read fresh each call so a Settings

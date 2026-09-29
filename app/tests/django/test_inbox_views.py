@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -26,6 +27,7 @@ from django.test import Client
 from django.urls import reverse
 
 from django_app.messages import views as messages_views_module
+from email_server import ScourResult
 from email_client.utils.sender_categorization import ImpactInference, ImpactLevel
 from email_server.config import EmailServerConfig, ProviderConfig
 
@@ -353,6 +355,31 @@ def test_inbox_view_show_ignored_query_param(client: Client, tmp_path: Path, mon
     client.get(reverse('django_app.messages:inbox') + '?show_ignored=true')
 
     assert [c['include_ignored'] for c in fake_server.get_message_digest_calls] == [False, True]
+
+
+def test_inbox_view_scour_query_param(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_config(tmp_path)
+    _patch_impact_categorization(monkeypatch)
+    loaded = [SimpleNamespace(provider='gmail', id='g1')]
+    found = [SimpleNamespace(provider='gmail', id='g0')]
+    fake_server = FakeUnifiedEmailServer(
+        authenticated_providers=[FakeAuthenticatedProvider('gmail', 'user1')],
+        messages=loaded,
+        scour_result=ScourResult(messages=found, scanned=100),
+    )
+    _patch_server(monkeypatch, fake_server)
+
+    client.get(reverse('django_app.messages:inbox'))
+    assert fake_server.scour_calls == []
+
+    response = client.get(reverse('django_app.messages:inbox') + '?scour=true')
+
+    [call] = fake_server.scour_calls
+    assert call['known_ids'] == {('gmail', 'g1')}
+    assert call['include_body'] is False
+    assert fake_server.get_message_digest_calls[-1]['messages'] == loaded + found
+    assert response.context['scour'] is True
+    assert response.context['messages_length'] == 2
 
 
 def test_inbox_view_get_does_not_trigger_any_action(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

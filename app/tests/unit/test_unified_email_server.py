@@ -26,7 +26,8 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
-from email_server import AuthenticatedProvider, EmailMessage, UnifiedEmailServer
+from email_server import AuthenticatedProvider, EmailMessage, MessagePage, UnifiedEmailServer
+import email_server as email_server_module
 from email_server.config import EmailServerConfig, ProviderConfig
 from email_server.providers.gmail.gmail import GmailProvider
 from email_server.providers.microsoft.microsoft import MicrosoftGraphProvider
@@ -1181,4 +1182,148 @@ def test_get_message_digest_can_exclude_ignored(tmp_path: Path, monkeypatch: pyt
     assert digest[0]['count'] == 1
     assert digest[0]['ignoredCount'] == 0
     assert [m['id'] for m in digest[0]['messages']] == ['m2']
+
+
+# --- scour_unread_messages ----------------------------------------------------
+
+class _PagedListing:
+    """get_messages_page stand-in serving pages keyed by page token (None is
+    the first page), recording each call's kwargs."""
+
+    def __init__(self, pages: Dict[Optional[str], MessagePage]) -> None:
+        self.pages = pages
+        self.calls: List[Dict[str, Any]] = []
+
+    def __call__(self, **kwargs: Any) -> MessagePage:
+        self.calls.append(kwargs)
+        return self.pages[kwargs['page_token']]
+
+
+def _day(n: int) -> datetime:
+    return datetime(2024, 1, n, tzinfo=timezone.utc)
+
+
+def _scour_account(server: UnifiedEmailServer, name: str, monkeypatch: pytest.MonkeyPatch, listing: _PagedListing) -> AuthenticatedProvider:
+    provider = server.get_provider(name)
+    monkeypatch.setattr(provider, 'get_messages_page', listing)
+    return AuthenticatedProvider(provider=provider, provider_name=name, user_id='user1')
+
+
+def test_scour_follows_page_tokens_until_exhausted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    listing = _PagedListing({
+        None: MessagePage([_message('m1', _day(1))], next_page_token='p2', scanned=1),
+        'p2': MessagePage([_message('m2', _day(2))], next_page_token=None, scanned=1),
+    })
+    account = _scour_account(server, 'microsoft', monkeypatch, listing)
+
+    result = server.scour_unread_messages(providers=[account])
+
+    assert [m.id for m in result.messages] == ['m1', 'm2']
+    assert result.scanned == 2
+    assert result.stopped_early is False
+    assert [c['page_token'] for c in listing.calls] == [None, 'p2']
+    assert all(c['unread_only'] is True for c in listing.calls)
+
+
+def test_scour_uses_oldest_first_only_where_supported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path, microsoft=True, gmail=True)
+    ms_listing = _PagedListing({None: MessagePage([], next_page_token=None, scanned=0)})
+    gmail_listing = _PagedListing({None: MessagePage([], next_page_token=None, scanned=0)})
+    accounts = [
+        _scour_account(server, 'microsoft', monkeypatch, ms_listing),
+        _scour_account(server, 'gmail', monkeypatch, gmail_listing),
+    ]
+
+    result = server.scour_unread_messages(providers=accounts)
+
+    assert ms_listing.calls[0]['oldest_first'] is True
+    assert gmail_listing.calls[0]['oldest_first'] is False
+    assert result.oldest_first_providers == ['microsoft']
+
+
+def test_scour_passes_known_ids_per_provider_as_skip_ids(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    listing = _PagedListing({None: MessagePage([], next_page_token=None, scanned=3)})
+    account = _scour_account(server, 'microsoft', monkeypatch, listing)
+
+    server.scour_unread_messages(providers=[account], known_ids={('microsoft', 'a'), ('gmail', 'b')})
+
+    assert set(listing.calls[0]['skip_ids']) == {'a'}
+
+
+def test_scour_stops_at_max_scanned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    listing = _PagedListing({
+        None: MessagePage([_message('m1', _day(1))], next_page_token='p2', scanned=150),
+        'p2': MessagePage([_message('m2', _day(2))], next_page_token='p3', scanned=50),
+    })
+    account = _scour_account(server, 'microsoft', monkeypatch, listing)
+
+    result = server.scour_unread_messages(providers=[account], max_scanned=200)
+
+    assert [c['page_size'] for c in listing.calls] == [100, 50]
+    assert result.scanned == 200
+    assert result.stopped_early is True
+
+
+def test_scour_stops_when_time_budget_runs_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    clock = iter([0.0, 0.0, 5.0])
+    monkeypatch.setattr(email_server_module, 'monotonic', lambda: next(clock))
+    listing = _PagedListing({None: MessagePage([_message('m1', _day(1))], next_page_token='p2', scanned=1)})
+    account = _scour_account(server, 'microsoft', monkeypatch, listing)
+
+    result = server.scour_unread_messages(providers=[account], time_budget_seconds=1.0)
+
+    assert len(listing.calls) == 1
+    assert result.stopped_early is True
+    assert [m.id for m in result.messages] == ['m1']
+
+
+def test_scour_records_error_and_keeps_earlier_pages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    first = MessagePage([_message('m1', _day(1))], next_page_token='p2', scanned=1)
+
+    def page(**kwargs: Any) -> MessagePage:
+        if kwargs['page_token'] is None:
+            return first
+        raise RuntimeError('HTTP 429')
+
+    provider = server.get_provider('microsoft')
+    monkeypatch.setattr(provider, 'get_messages_page', page)
+    account = AuthenticatedProvider(provider=provider, provider_name='microsoft', user_id='user1')
+
+    result = server.scour_unread_messages(providers=[account])
+
+    assert [m.id for m in result.messages] == ['m1']
+    assert result.errors == ['microsoft: HTTP 429']
+
+
+def test_scour_sorts_oldest_first_and_drops_blocked_senders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server(tmp_path)
+    blocked = _message('spam', _day(1))
+    blocked.sender = 'spam@example.com'
+    server.block_sender('spam@example.com')
+    listing = _PagedListing({None: MessagePage(
+        [_message('newer', _day(5)), blocked, _message('older', _day(2))], next_page_token=None, scanned=3,
+    )})
+    account = _scour_account(server, 'microsoft', monkeypatch, listing)
+
+    result = server.scour_unread_messages(providers=[account])
+
+    assert [m.id for m in result.messages] == ['older', 'newer']
+
+
+def test_scour_annotates_ignore_statuses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from email_server.message_ignore_statuses import IgnoreStatus
+
+    server = _server(tmp_path)
+    server.mark_messages_ignored('microsoft', ['m1'])
+    listing = _PagedListing({None: MessagePage([_message('m1', _day(1))], next_page_token=None, scanned=1)})
+    account = _scour_account(server, 'microsoft', monkeypatch, listing)
+
+    result = server.scour_unread_messages(providers=[account])
+
+    assert result.messages[0].ignore_status is IgnoreStatus.IGNORED
 

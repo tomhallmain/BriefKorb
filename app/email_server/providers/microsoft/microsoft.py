@@ -2,14 +2,14 @@
 Microsoft Graph API email provider implementation
 """
 
-from typing import Dict, List, Optional, Callable
+from typing import Collection, Dict, List, Optional, Callable
 from datetime import datetime
 import requests
 import html as html_escape
 import time
 from concurrent.futures import ThreadPoolExecutor, wait, Future
 from ...auth import MicrosoftOAuth, TokenManager
-from ... import EmailProvider, EmailMessage
+from ... import EmailProvider, EmailMessage, MessagePage
 from ...utils.logger import setup_logger
 
 # Set up logger
@@ -26,6 +26,7 @@ class MicrosoftGraphProvider(EmailProvider):
     # Gmail's search-operator name ('sent'), since folder naming isn't
     # unified across providers the way "inbox" happens to be.
     SENT_FOLDER = 'sentitems'
+    SUPPORTS_OLDEST_FIRST = True
 
     def __init__(self, client_id: str, client_secret: str, tenant_id: str, redirect_uri: str, scopes: Optional[List[str]] = None, token_manager: Optional[TokenManager] = None):
         self.client_id = client_id
@@ -209,35 +210,87 @@ class MicrosoftGraphProvider(EmailProvider):
             response.raise_for_status()
 
             message_list = response.json().get('value', [])
-
-            if not include_body:
-                messages = []
-                for msg in message_list:
-                    try:
-                        messages.append(self._parse_graph_message(msg))
-                    except Exception as e:
-                        logger.warning(f"Failed to parse message {msg.get('id')}: {e}")
-                logger.info(f"Retrieved {len(messages)} messages from {folder} for user {user_id}")
-                return messages
-
-            messages = []
-            if message_list:
-                with ThreadPoolExecutor(max_workers=min(10, len(message_list))) as executor:
-                    futures: List[Future[Optional[EmailMessage]]] = [
-                        executor.submit(self._fetch_and_parse_message, headers, msg['id'])
-                        for msg in message_list
-                    ]
-                    wait(futures)
-                for future in futures:
-                    parsed = future.result()
-                    if parsed is not None:
-                        messages.append(parsed)
-
+            messages = self._messages_from_listing(headers, message_list, include_body)
             logger.info(f"Retrieved {len(messages)} messages from {folder} for user {user_id}")
             return messages
         except Exception as e:
             logger.error(f"Failed to get messages for user {user_id}: {str(e)}")
             return []
+
+    def _messages_from_listing(self, headers: Dict[str, str], message_list: List[Dict], include_body: bool) -> List[EmailMessage]:
+        """Turn a folder listing's items into EmailMessages. The listing
+        carries metadata only, so `include_body` fetches each message in
+        parallel; a message that fails to parse or fetch is skipped."""
+        if not include_body:
+            messages = []
+            for msg in message_list:
+                try:
+                    messages.append(self._parse_graph_message(msg))
+                except Exception as e:
+                    logger.warning(f"Failed to parse message {msg.get('id')}: {e}")
+            return messages
+
+        messages = []
+        if message_list:
+            with ThreadPoolExecutor(max_workers=min(10, len(message_list))) as executor:
+                futures: List[Future[Optional[EmailMessage]]] = [
+                    executor.submit(self._fetch_and_parse_message, headers, msg['id'])
+                    for msg in message_list
+                ]
+                wait(futures)
+            for future in futures:
+                parsed = future.result()
+                if parsed is not None:
+                    messages.append(parsed)
+        return messages
+
+    def get_messages_page(self,
+                          user_id: str,
+                          folder: str = 'inbox',
+                          page_size: int = 100,
+                          unread_only: bool = False,
+                          include_body: bool = True,
+                          page_token: Optional[str] = None,
+                          oldest_first: bool = False,
+                          skip_ids: Collection[str] = ()) -> MessagePage:
+        """See EmailProvider.get_messages_page. The page token is Graph's
+        `@odata.nextLink`, a complete URL that already carries the query."""
+        headers = self._get_headers(user_id)
+        if page_token:
+            response = requests.get(page_token, headers=headers, timeout=GRAPH_REQUEST_TIMEOUT_SECONDS)
+        else:
+            filters = []
+            if oldest_first:
+                # Graph documents that a message query's $orderby property
+                # must also lead its $filter; this date bound matches all.
+                filters.append("receivedDateTime ge 1900-01-01T00:00:00Z")
+            if unread_only:
+                filters.append("isRead eq false")
+            params = {
+                '$top': page_size,
+                '$select': 'id,subject,from,toRecipients,receivedDateTime,isRead',
+                '$orderby': f"receivedDateTime {'asc' if oldest_first else 'desc'}",
+            }
+            if filters:
+                params['$filter'] = ' and '.join(filters)
+            response = requests.get(
+                f"{self.base_url}/me/mailFolders/{folder}/messages",
+                headers=headers,
+                params=params,
+                timeout=GRAPH_REQUEST_TIMEOUT_SECONDS,
+            )
+        if not response.ok:
+            logger.error(f"Graph API {response.status_code} response body: {response.text[:500]}")
+        response.raise_for_status()
+
+        data = response.json()
+        message_list = data.get('value', [])
+        wanted = [msg for msg in message_list if msg.get('id') not in skip_ids]
+        return MessagePage(
+            messages=self._messages_from_listing(headers, wanted, include_body),
+            next_page_token=data.get('@odata.nextLink'),
+            scanned=len(message_list),
+        )
 
     def get_message(self, user_id: str, message_id: str) -> Optional[EmailMessage]:
         """Get a single message (including body) by id."""

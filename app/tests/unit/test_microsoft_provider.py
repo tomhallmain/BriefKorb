@@ -652,3 +652,112 @@ def test_block_senders_returns_empty_list_on_unexpected_exception(tmp_path: Path
     monkeypatch.setattr(provider, '_get_headers', raise_error)
 
     assert provider.block_senders('user1', ['Alice']) == []
+
+
+# --- get_messages_page ---------------------------------------------------------
+
+def _listing_item(msg_id: str) -> Dict[str, Any]:
+    return {
+        'id': msg_id, 'subject': 'S', 'isRead': False,
+        'from': {'emailAddress': {'address': 'a@example.com'}},
+        'receivedDateTime': '2024-01-01T12:00:00Z',
+    }
+
+
+def test_get_messages_page_oldest_first_unread_query(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider(tmp_path)
+    monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: {'access_token': 'at'})
+    calls: List[Dict[str, Any]] = []
+
+    def fake_get(url: str, headers: Any = None, params: Any = None, timeout: Any = None) -> _FakeResponse:
+        calls.append({'url': url, 'params': params})
+        return _FakeResponse(json_data={'value': [_listing_item('m1')], '@odata.nextLink': 'https://graph/next'})
+
+    monkeypatch.setattr(microsoft_provider_module.requests, 'get', fake_get)
+
+    page = provider.get_messages_page('user1', page_size=50, unread_only=True, include_body=False, oldest_first=True)
+
+    assert calls[0]['url'].endswith('/me/mailFolders/inbox/messages')
+    params = calls[0]['params']
+    assert params['$top'] == 50
+    assert params['$orderby'] == 'receivedDateTime asc'
+    assert params['$filter'] == 'receivedDateTime ge 1900-01-01T00:00:00Z and isRead eq false'
+    assert [m.id for m in page.messages] == ['m1']
+    assert page.next_page_token == 'https://graph/next'
+    assert page.scanned == 1
+
+
+def test_get_messages_page_newest_first_query(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider(tmp_path)
+    monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: {'access_token': 'at'})
+    calls: List[Dict[str, Any]] = []
+
+    def fake_get(url: str, headers: Any = None, params: Any = None, timeout: Any = None) -> _FakeResponse:
+        calls.append({'url': url, 'params': params})
+        return _FakeResponse(json_data={'value': []})
+
+    monkeypatch.setattr(microsoft_provider_module.requests, 'get', fake_get)
+
+    page = provider.get_messages_page('user1', unread_only=True, include_body=False)
+
+    assert calls[0]['params']['$orderby'] == 'receivedDateTime desc'
+    assert calls[0]['params']['$filter'] == 'isRead eq false'
+    assert page.next_page_token is None
+
+
+def test_get_messages_page_follows_next_link_as_is(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider(tmp_path)
+    monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: {'access_token': 'at'})
+    calls: List[Dict[str, Any]] = []
+
+    def fake_get(url: str, headers: Any = None, params: Any = None, timeout: Any = None) -> _FakeResponse:
+        calls.append({'url': url, 'params': params})
+        return _FakeResponse(json_data={'value': [_listing_item('m2')]})
+
+    monkeypatch.setattr(microsoft_provider_module.requests, 'get', fake_get)
+
+    page = provider.get_messages_page('user1', include_body=False, page_token='https://graph/next')
+
+    assert calls == [{'url': 'https://graph/next', 'params': None}]
+    assert [m.id for m in page.messages] == ['m2']
+
+
+def test_get_messages_page_skips_known_ids_without_fetching_bodies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider(tmp_path)
+    monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: {'access_token': 'at'})
+    detail_urls: List[str] = []
+
+    def fake_get(url: str, headers: Any = None, params: Any = None, timeout: Any = None) -> _FakeResponse:
+        if url.endswith('/messages'):
+            return _FakeResponse(json_data={'value': [_listing_item('m1'), _listing_item('m2')]})
+        detail_urls.append(url)
+        return _FakeResponse(json_data={**_listing_item(url.rsplit('/', 1)[1]), 'body': {'content': 'x', 'contentType': 'html'}})
+
+    monkeypatch.setattr(microsoft_provider_module.requests, 'get', fake_get)
+
+    page = provider.get_messages_page('user1', include_body=True, skip_ids={'m1'})
+
+    assert [m.id for m in page.messages] == ['m2']
+    assert page.scanned == 2
+    assert [u.rsplit('/', 1)[1] for u in detail_urls] == ['m2']
+
+
+def test_get_messages_page_raises_on_http_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider(tmp_path)
+    monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: {'access_token': 'at'})
+    monkeypatch.setattr(
+        microsoft_provider_module.requests, 'get',
+        lambda url, headers=None, params=None, timeout=None: _FakeResponse(status_code=429, text='throttled'),
+    )
+
+    with pytest.raises(RuntimeError):
+        provider.get_messages_page('user1')
+
+
+def test_get_messages_page_raises_when_not_authenticated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider(tmp_path)
+    monkeypatch.setattr(provider.oauth, 'get_valid_token', lambda user_id: None)
+
+    with pytest.raises(RuntimeError):
+        provider.get_messages_page('user1')
+

@@ -2,7 +2,7 @@
 Worker threads for background email operations
 """
 
-from typing import Optional, List
+from typing import List, Optional, Set, Tuple
 from PySide6.QtCore import QThread, Signal
 
 # Add parent directories to path for imports
@@ -44,6 +44,38 @@ class EmailWorkerThread(QThread):
                 unread_only=self.unread_only
             )
             self.messages_loaded.emit(messages)
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+
+
+# Bounds for one desktop "Scour Unread" run. It runs on a background
+# thread, so these can be looser than the web app's.
+SCOUR_MAX_SCANNED = 2000
+SCOUR_TIME_BUDGET_SECONDS = 120.0
+
+
+class ScourWorkerThread(QThread):
+    """Runs UnifiedEmailServer.scour_unread_messages() off the UI thread."""
+    scour_complete = Signal(object)   # ScourResult
+    error_occurred = Signal(str)
+
+    def __init__(self, server: UnifiedEmailServer, known_ids: Set[Tuple[str, str]], provider_name: Optional[str] = None):
+        super().__init__()
+        self.server = server
+        self.known_ids = known_ids
+        self.provider_name = provider_name  # None means every provider
+        self.folder = 'inbox'
+
+    def run(self):
+        try:
+            result = self.server.scour_unread_messages(
+                providers=self.server.get_authenticated_providers(self.provider_name),
+                folder=self.folder,
+                known_ids=self.known_ids,
+                max_scanned=SCOUR_MAX_SCANNED,
+                time_budget_seconds=SCOUR_TIME_BUDGET_SECONDS,
+            )
+            self.scour_complete.emit(result)
         except Exception as e:
             self.error_occurred.emit(str(e))
 

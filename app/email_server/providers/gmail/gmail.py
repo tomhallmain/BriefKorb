@@ -2,7 +2,7 @@
 Gmail API provider implementation
 """
 
-from typing import Dict, List, Optional, Union
+from typing import Collection, Dict, List, Optional, Union
 from datetime import datetime, timezone
 import base64
 from email.mime.text import MIMEText
@@ -11,7 +11,7 @@ from email.utils import parsedate_to_datetime
 import httplib2
 from google_auth_httplib2 import AuthorizedHttp
 from googleapiclient.discovery import build
-from ... import EmailProvider, EmailMessage
+from ... import EmailProvider, EmailMessage, MessagePage
 from ...auth.gmail import GmailOAuth
 from ...auth import TokenManager
 from ...utils.logger import setup_logger
@@ -200,44 +200,80 @@ class GmailProvider(EmailProvider):
                 maxResults=max_messages
             ).execute()
 
-            # Gmail's list endpoint returns ids only, so each message still
-            # needs a .get() -- but format='metadata' skips the body, which
-            # is what get_message_digest() actually wants. Don't thread the
-            # shared httplib2 transport; batch instead.
-            messages: List[EmailMessage] = []
-
-            def _collect(request_id: str, response: Dict, exception: Optional[Exception]) -> None:
-                if exception is not None:
-                    logger.warning(f"Failed to fetch message {request_id}: {exception}")
-                    return
-                try:
-                    messages.append(self._parse_message_response(response))
-                except Exception as parse_error:
-                    logger.warning(f"Failed to parse message {request_id}: {parse_error}")
-
             message_ids = [msg['id'] for msg in results.get('messages', [])]
-            batch_size = GMAIL_BATCH_SIZE if include_body else GMAIL_METADATA_BATCH_SIZE
-            for i in range(0, len(message_ids), batch_size):
-                chunk = message_ids[i:i + batch_size]
-                batch = self._service.new_batch_http_request(callback=_collect)
-                for msg_id in chunk:
-                    if include_body:
-                        request = self._service.users().messages().get(
-                            userId='me', id=msg_id, format='full',
-                        )
-                    else:
-                        request = self._service.users().messages().get(
-                            userId='me', id=msg_id, format='metadata',
-                            metadataHeaders=GMAIL_METADATA_HEADERS,
-                        )
-                    batch.add(request, request_id=msg_id)
-                batch.execute()
-
+            messages = self._fetch_messages_by_id(message_ids, include_body)
             logger.info(f"Retrieved {len(messages)} messages from {folder} for user {user_id}")
             return messages
         except Exception as e:
             logger.error(f"Failed to get messages for user {user_id}: {str(e)}")
             return []
+
+    def _fetch_messages_by_id(self, message_ids: List[str], include_body: bool) -> List[EmailMessage]:
+        """Fetch and parse listed message ids. A message that fails to
+        fetch or parse is skipped."""
+        # Gmail's list endpoint returns ids only, so each message still
+        # needs a .get() -- but format='metadata' skips the body, which
+        # is what get_message_digest() actually wants. Don't thread the
+        # shared httplib2 transport; batch instead.
+        messages: List[EmailMessage] = []
+
+        def _collect(request_id: str, response: Dict, exception: Optional[Exception]) -> None:
+            if exception is not None:
+                logger.warning(f"Failed to fetch message {request_id}: {exception}")
+                return
+            try:
+                messages.append(self._parse_message_response(response))
+            except Exception as parse_error:
+                logger.warning(f"Failed to parse message {request_id}: {parse_error}")
+
+        batch_size = GMAIL_BATCH_SIZE if include_body else GMAIL_METADATA_BATCH_SIZE
+        for i in range(0, len(message_ids), batch_size):
+            chunk = message_ids[i:i + batch_size]
+            batch = self._service.new_batch_http_request(callback=_collect)
+            for msg_id in chunk:
+                if include_body:
+                    request = self._service.users().messages().get(
+                        userId='me', id=msg_id, format='full',
+                    )
+                else:
+                    request = self._service.users().messages().get(
+                        userId='me', id=msg_id, format='metadata',
+                        metadataHeaders=GMAIL_METADATA_HEADERS,
+                    )
+                batch.add(request, request_id=msg_id)
+            batch.execute()
+        return messages
+
+    def get_messages_page(self,
+                          user_id: str,
+                          folder: str = 'inbox',
+                          page_size: int = 100,
+                          unread_only: bool = False,
+                          include_body: bool = True,
+                          page_token: Optional[str] = None,
+                          oldest_first: bool = False,
+                          skip_ids: Collection[str] = ()) -> MessagePage:
+        """See EmailProvider.get_messages_page. `messages.list` has no sort
+        parameter and lists newest-first, so `oldest_first` is ignored
+        (SUPPORTS_OLDEST_FIRST is False)."""
+        if not self._service and not self.authenticate(user_id):
+            raise RuntimeError(f"Failed to authenticate Gmail user {user_id}")
+
+        query = f'in:{folder}'
+        if unread_only:
+            query += ' is:unread'
+        list_kwargs = {'userId': 'me', 'q': query, 'maxResults': page_size}
+        if page_token:
+            list_kwargs['pageToken'] = page_token
+        results = self._service.users().messages().list(**list_kwargs).execute()
+
+        listed_ids = [msg['id'] for msg in results.get('messages', [])]
+        wanted = [msg_id for msg_id in listed_ids if msg_id not in skip_ids]
+        return MessagePage(
+            messages=self._fetch_messages_by_id(wanted, include_body),
+            next_page_token=results.get('nextPageToken'),
+            scanned=len(listed_ids),
+        )
 
     def get_message(self, user_id: str, message_id: str) -> Optional[EmailMessage]:
         """Get a single message (including body) by id."""

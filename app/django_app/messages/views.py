@@ -25,6 +25,11 @@ from django_app.authentication import require_external_api_token
 
 logger = setup_logger('django_app.messages')
 
+# Bounds for one web scour. Tighter than the desktop app's, since a scour
+# runs inside the request and the browser waits on it.
+SCOUR_MAX_SCANNED = 500
+SCOUR_TIME_BUDGET_SECONDS = 20.0
+
 
 def _resolve_selected_buckets(
     server: UnifiedEmailServer, mailbox: str, selected_keys: List[str],
@@ -61,6 +66,26 @@ _BULK_ACTIONS = ('markAsRead', 'deleteMessage', 'deleteMessageBlockSender', *_IG
 def _posted_action(post) -> Optional[str]:
     """The bulk action named by whichever action submit button was pressed."""
     return next((a for a in _BULK_ACTIONS if a in post), None)
+
+
+def _add_scoured_messages(request, server: UnifiedEmailServer, mailbox: str, messages: List[Any]) -> List[Any]:
+    """Scour for unread messages beyond `messages`, flash a summary, and
+    return `messages` plus whatever was found. Metadata only: the digest
+    doesn't read bodies, and message_detail_view fetches its own."""
+    result = server.scour_unread_messages(
+        folder=mailbox,
+        include_body=False,
+        known_ids={(m.provider, m.id) for m in messages},
+        max_scanned=SCOUR_MAX_SCANNED,
+        time_budget_seconds=SCOUR_TIME_BUDGET_SECONDS,
+    )
+    summary = f"Scour found {len(result.messages)} more unread message(s) ({result.scanned} scanned)."
+    if result.stopped_early:
+        summary += " Stopped at the scour limit before reaching the end of the mailbox."
+    django_messages.info(request, summary)
+    for error in result.errors:
+        django_messages.warning(request, f"Scour failed for {error}")
+    return messages + result.messages
 
 
 def _perform_ignore_action(request, server: UnifiedEmailServer, action: str, selected_buckets: List[Dict[str, Any]]) -> None:
@@ -243,6 +268,8 @@ def messages_view(request, low_impact_only: bool = False):
         # Fetch fresh for display -- reflects any action just performed above,
         # or is simply the normal display fetch if this was a GET/filter-only request.
         messages = server.get_user_messages(folder=mailbox, unread_only=exclude_read, max_messages=config.max_messages)
+        if request.method == 'POST' and 'scourUnread' in request.POST:
+            messages = _add_scoured_messages(request, server, mailbox, messages)
         message_data = server.get_message_digest(messages=messages, include_ignored=show_ignored)
         message_data = annotate_sender_impact(message_data, sender_categorization)
         if low_impact_only:
@@ -485,6 +512,7 @@ def inbox_view(request):
     unread_only = _parse_bool_param(request, 'unread_only', default=True)
     oldest_first = _parse_bool_param(request, 'oldest_first', default=False)
     show_ignored = _parse_bool_param(request, 'show_ignored', default=False)
+    scour = _parse_bool_param(request, 'scour', default=False)
 
     try:
         sender_categorization = SenderCategorizationManager(config.token_storage_path)
@@ -497,6 +525,8 @@ def inbox_view(request):
                 _perform_bulk_action(request, server, action, selected_buckets)
 
         messages = server.get_user_messages(folder=mailbox, unread_only=unread_only, max_messages=config.max_messages)
+        if scour:
+            messages = _add_scoured_messages(request, server, mailbox, messages)
         message_data = server.get_message_digest(messages=messages, include_ignored=show_ignored)
         message_data = annotate_sender_impact(message_data, sender_categorization)
         # Confirmed low-impact senders (subscriptions, ads, etc.) are hidden
@@ -529,6 +559,7 @@ def inbox_view(request):
         'unread_only': unread_only,
         'oldest_first': oldest_first,
         'show_ignored': show_ignored,
+        'scour': scour,
         'entity_count': entity_count,
         'is_authenticated': True,
     })

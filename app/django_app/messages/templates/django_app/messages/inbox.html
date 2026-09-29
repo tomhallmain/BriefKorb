@@ -40,6 +40,10 @@
                 <input type="checkbox" name="show_ignored" value="true" {% if show_ignored %}checked{% endif %}>
                 Show ignored
             </label>
+            <label class="mr-2 ml-3" title="Search further back for unread messages beyond the normal fetch limit. Can be slow, and runs again on every page load while checked, including after each action below.">
+                <input type="checkbox" name="scour" value="true" {% if scour %}checked{% endif %}>
+                Scour older unread
+            </label>
             <button type="submit" class="btn btn-secondary btn-sm ml-2">Update</button>
         </form>
 

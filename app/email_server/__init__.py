@@ -7,9 +7,10 @@ This module provides a unified interface for interacting with different email pr
 
 from abc import ABC, abstractmethod
 from email.utils import parseaddr
-from typing import Any, List, Dict, Optional, Set, Union, TYPE_CHECKING
+from typing import Any, Collection, List, Dict, Optional, Set, Tuple, Union, TYPE_CHECKING
 from datetime import datetime, timedelta, timezone
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from time import monotonic
 from .config import EmailServerConfig, create_default_config
 from .utils.logger import setup_logger
 from .utils.datetime_compat import normalize_received_at_utc
@@ -69,8 +70,23 @@ class EmailMessage:
         # Local-only; set by UnifiedEmailServer.get_user_messages().
         self.ignore_status: Optional[IgnoreStatus] = None
 
+@dataclass
+class MessagePage:
+    """One page of a paginated message listing (see
+    EmailProvider.get_messages_page)."""
+    messages: List[EmailMessage]
+    # Opaque cursor for the next page; None once the listing is exhausted.
+    next_page_token: Optional[str]
+    # Messages listed on this page, including ones skipped via `skip_ids`.
+    scanned: int
+
+
 class EmailProvider(ABC):
     """Abstract base class for email providers"""
+
+    # Whether get_messages_page() can list oldest-first. Providers that
+    # can't ignore `oldest_first` and list newest-first.
+    SUPPORTS_OLDEST_FIRST = False
     
     @abstractmethod
     def authenticate(self, user_id: str) -> bool:
@@ -91,6 +107,24 @@ class EmailProvider(ABC):
         reads bodies. Desktop/web list fetches leave this True.
         """
         pass
+
+    def get_messages_page(self,
+                          user_id: str,
+                          folder: str = 'inbox',
+                          page_size: int = 100,
+                          unread_only: bool = False,
+                          include_body: bool = True,
+                          page_token: Optional[str] = None,
+                          oldest_first: bool = False,
+                          skip_ids: Collection[str] = ()) -> MessagePage:
+        """Fetch one page of a folder listing. Pass the returned
+        `next_page_token` back to continue. Messages whose id is in
+        `skip_ids` are counted in `scanned` but not fetched or returned.
+
+        Unlike get_messages(), failures raise, so a caller walking many
+        pages can tell an error from an exhausted listing.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support paginated listing")
 
     @abstractmethod
     def get_message(self, user_id: str, message_id: str) -> Optional[EmailMessage]:
@@ -141,6 +175,23 @@ class EmailProvider(ABC):
         and reporting which senders succeeded.
         """
         pass
+
+# Messages requested per page while scouring.
+SCOUR_PAGE_SIZE = 100
+
+
+@dataclass
+class ScourResult:
+    """Outcome of UnifiedEmailServer.scour_unread_messages()."""
+    # Found messages not in `known_ids`, oldest first.
+    messages: List[EmailMessage] = field(default_factory=list)
+    scanned: int = 0
+    # True if any account's listing was cut off by a limit before it ran out.
+    stopped_early: bool = False
+    # Providers whose listing ran oldest-first (see SUPPORTS_OLDEST_FIRST).
+    oldest_first_providers: List[str] = field(default_factory=list)
+    errors: List[str] = field(default_factory=list)
+
 
 class UnifiedEmailServer:
     """Main class for the unified email server"""
@@ -384,13 +435,81 @@ class UnifiedEmailServer:
             except Exception as e:
                 logger.error(f"Failed to get messages from {auth_prov.provider_name} for user {auth_prov.user_id}: {e}")
 
+        messages = self._prepare_fetched_messages(messages)
+        return sorted(messages, key=lambda x: x.received_date, reverse=True)
+
+    def _prepare_fetched_messages(self, messages: List[EmailMessage]) -> List[EmailMessage]:
+        """Normalize dates, drop locally blocked senders, and set ignore
+        statuses on freshly fetched inbox messages."""
         for m in messages:
             m.received_date = normalize_received_at_utc(m.received_date)
-
         messages = [m for m in messages if not self.is_sender_blocked(parseaddr(m.sender or '')[1])]
         self.annotate_ignore_statuses(messages)
+        return messages
 
-        return sorted(messages, key=lambda x: x.received_date, reverse=True)
+    def scour_unread_messages(
+        self,
+        providers: Optional[List[AuthenticatedProvider]] = None,
+        folder: str = 'inbox',
+        include_body: bool = True,
+        known_ids: Collection[Tuple[str, str]] = (),
+        max_scanned: int = 2000,
+        time_budget_seconds: float = 120.0,
+    ) -> ScourResult:
+        """Page through each account's unread listing to find unread mail
+        beyond a normal fetch's cap. Providers with SUPPORTS_OLDEST_FIRST
+        start from the oldest; others page back from the newest, so they
+        return the oldest reached within the limits, not the mailbox's oldest.
+
+        `known_ids` ((provider, id) pairs) are counted but not fetched or
+        returned. `max_scanned` bounds each account; `time_budget_seconds`
+        bounds the whole scour, checked between pages (one page can overrun).
+        """
+        result = ScourResult()
+        deadline = monotonic() + time_budget_seconds
+        known_by_provider: Dict[str, Set[str]] = {}
+        for provider_name, message_id in known_ids:
+            known_by_provider.setdefault(provider_name, set()).add(message_id)
+
+        found: List[EmailMessage] = []
+        for auth_prov in (providers if providers is not None else self.get_authenticated_providers()):
+            provider = auth_prov.provider
+            oldest_first = provider.SUPPORTS_OLDEST_FIRST
+            if oldest_first and auth_prov.provider_name not in result.oldest_first_providers:
+                result.oldest_first_providers.append(auth_prov.provider_name)
+            skip_ids = known_by_provider.get(auth_prov.provider_name, set())
+            scanned = 0
+            page_token: Optional[str] = None
+            while True:
+                if scanned >= max_scanned or monotonic() >= deadline:
+                    result.stopped_early = True
+                    break
+                try:
+                    page = provider.get_messages_page(
+                        user_id=auth_prov.user_id,
+                        folder=folder,
+                        page_size=min(SCOUR_PAGE_SIZE, max_scanned - scanned),
+                        unread_only=True,
+                        include_body=include_body,
+                        page_token=page_token,
+                        oldest_first=oldest_first,
+                        skip_ids=skip_ids,
+                    )
+                except Exception as e:
+                    logger.error(f"Scour failed for {auth_prov.provider_name} user {auth_prov.user_id}: {e}")
+                    result.errors.append(f"{auth_prov.provider_name}: {e}")
+                    break
+                scanned += page.scanned
+                found.extend(page.messages)
+                page_token = page.next_page_token
+                if page_token is None:
+                    break
+            result.scanned += scanned
+            logger.info(f"Scoured {scanned} unread message(s) from {auth_prov.provider_name} for user {auth_prov.user_id}")
+
+        found = self._prepare_fetched_messages(found)
+        result.messages = sorted(found, key=lambda m: m.received_date)
+        return result
 
     def get_sent_messages(self, max_messages: int = 1000) -> List[EmailMessage]:
         """Fetch every authenticated provider's sent-mail folder.

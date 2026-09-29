@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -21,6 +22,7 @@ from django.test import Client
 from django.urls import reverse
 
 from django_app.messages import views as messages_views_module
+from email_server import ScourResult
 from email_client.utils.sender_categorization import ImpactInference, ImpactLevel
 from email_server.config import EmailServerConfig, ExternalApiConfig, ExternalApiToken, ProviderConfig
 
@@ -502,6 +504,52 @@ def test_messages_view_context_sender_takes_precedence_over_selected_options(cli
 
     assert fake_server.mark_messages_as_read_calls == [{'user_id': 'user1', 'provider_name': 'microsoft', 'message_ids': ['m1']}]
 
+
+
+
+# --- messages_view: scour unread -------------------------------------------------
+
+def _scoured(msg_id: str) -> Any:
+    return SimpleNamespace(provider='microsoft', id=msg_id)
+
+
+def test_messages_view_does_not_scour_without_the_button(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_config(tmp_path)
+    _patch_sender_categorization(monkeypatch)
+    fake_server = FakeUnifiedEmailServer(authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')])
+    _patch_server(monkeypatch, fake_server)
+
+    client.get(reverse('django_app.messages:messages'))
+    client.post(reverse('django_app.messages:messages'), {'mailbox': 'inbox'})
+
+    assert fake_server.scour_calls == []
+
+
+def test_messages_view_scour_adds_found_messages_and_reports(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_config(tmp_path)
+    _patch_sender_categorization(monkeypatch)
+    loaded = [_scoured('m1')]
+    found = [_scoured('old1'), _scoured('old2')]
+    fake_server = FakeUnifiedEmailServer(
+        authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')],
+        messages=loaded,
+        scour_result=ScourResult(messages=found, scanned=340, stopped_early=True, errors=['gmail: quota']),
+    )
+    _patch_server(monkeypatch, fake_server)
+
+    response = client.post(reverse('django_app.messages:messages'), {'mailbox': 'junkemail', 'scourUnread': ''})
+
+    [call] = fake_server.scour_calls
+    assert call['folder'] == 'junkemail'
+    assert call['include_body'] is False
+    assert call['known_ids'] == {('microsoft', 'm1')}
+    assert call['max_scanned'] == messages_views_module.SCOUR_MAX_SCANNED
+    assert call['time_budget_seconds'] == messages_views_module.SCOUR_TIME_BUDGET_SECONDS
+    assert fake_server.get_message_digest_calls[-1]['messages'] == loaded + found
+    assert response.context['messages_length'] == 3
+    shown = [str(m) for m in response.context['messages']]
+    assert any('found 2 more unread' in m and '340 scanned' in m and 'scour limit' in m for m in shown)
+    assert any('Scour failed for gmail: quota' in m for m in shown)
 
 
 # --- messages_view: ignore statuses ------------------------------------------
