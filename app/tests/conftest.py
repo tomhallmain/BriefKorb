@@ -131,6 +131,9 @@ def isolated_app_state(tmp_path, monkeypatch):
     monkeypatch.setenv("BRIEFKORB_TOKEN_STORAGE_PATH", str(token_dir))
 
     import email_server.utils.app_info_cache as aic
+    from email_server.message_ignore_statuses import clear_session_seen
     aic._cache_instances.clear()
+    clear_session_seen()
     yield
     aic._cache_instances.clear()
+    clear_session_seen()

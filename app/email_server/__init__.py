@@ -16,6 +16,7 @@ from .utils.datetime_compat import normalize_received_at_utc
 from .auth import TokenManager
 from .blocklist import SenderBlocklist
 from .blocked_sender_tracking import BlockedSenderTracker, BlockEvent, MAX_TRACKED_SUBJECTS, group_events_by_sender
+from .message_ignore_statuses import IgnoreStatus, MessageIgnoreStore
 
 # Set up logger
 logger = setup_logger('email_server')
@@ -65,6 +66,8 @@ class EmailMessage:
         self.body = body
         self.is_read = is_read
         self.provider = provider
+        # Local-only; set by UnifiedEmailServer.get_user_messages().
+        self.ignore_status: Optional[IgnoreStatus] = None
 
 class EmailProvider(ABC):
     """Abstract base class for email providers"""
@@ -162,6 +165,7 @@ class UnifiedEmailServer:
 
         self.blocklist = SenderBlocklist(config.token_storage_path)
         self.blocked_sender_tracker = BlockedSenderTracker(config.token_storage_path)
+        self.message_ignores = MessageIgnoreStore(config.token_storage_path)
 
         self.entity_graph_manager = self._init_entity_graph_manager(config.token_storage_path)
 
@@ -384,6 +388,7 @@ class UnifiedEmailServer:
             m.received_date = normalize_received_at_utc(m.received_date)
 
         messages = [m for m in messages if not self.is_sender_blocked(parseaddr(m.sender or '')[1])]
+        self.annotate_ignore_statuses(messages)
 
         return sorted(messages, key=lambda x: x.received_date, reverse=True)
 
@@ -432,6 +437,7 @@ class UnifiedEmailServer:
         stale_after_days: float = 3.0,
         awaiting_your_reply_only: bool = False,
         awaiting_their_reply_only: bool = False,
+        include_ignored: bool = True,
     ) -> List[Dict[str, Any]]:
         """Aggregate messages from every authenticated provider into one row
         per sender, tagged with the source provider.
@@ -476,6 +482,12 @@ class UnifiedEmailServer:
         buckets that don't match, rather than just annotating them -- for a
         caller that only wants a stale-conversations view.
 
+        Each message summary carries `ignoreStatus` (see
+        message_ignore_statuses.IgnoreStatus, or null) and each bucket an
+        `ignoredCount`. `include_ignored=False` drops messages with either
+        ignore status before aggregation, the same way `subject_keyword`
+        filters.
+
         Deliberately does not apply sender-impact/spam categorization --
         that lives in SenderCategorizationManager (email_client.utils.
         sender_categorization), a layer above this one. Callers that want it
@@ -492,6 +504,9 @@ class UnifiedEmailServer:
             keyword_lower = subject_keyword.lower()
             messages = [m for m in messages if keyword_lower in (m.subject or '').lower()]
 
+        if not include_ignored:
+            messages = [m for m in messages if m.ignore_status is None]
+
         buckets: Dict[tuple, Dict[str, Any]] = {}
         for message in messages:
             # EmailMessage.sender isn't consistently shaped across providers
@@ -503,14 +518,18 @@ class UnifiedEmailServer:
             name = name or 'Unknown'
             key = (message.provider, name)
             last_received = message.received_date.isoformat() if message.received_date else ''
+            ignore_status = message.ignore_status
             message_summary = {
                 'id': message.id,
                 'subject': message.subject,
                 'lastReceivedDateTime': last_received,
                 'isRead': message.is_read,
+                'ignoreStatus': ignore_status.value if ignore_status else None,
             }
+            ignored_increment = 1 if ignore_status else 0
             if key in buckets:
                 buckets[key]['count'] += 1
+                buckets[key]['ignoredCount'] += ignored_increment
                 buckets[key]['messages'].append(message_summary)
             else:
                 buckets[key] = {
@@ -519,6 +538,7 @@ class UnifiedEmailServer:
                     'subject': message.subject,
                     'lastReceivedDateTime': last_received,
                     'count': 1,
+                    'ignoredCount': ignored_increment,
                     'provider': message.provider,
                     'messages': [message_summary],
                 }
@@ -663,6 +683,27 @@ class UnifiedEmailServer:
         
         return success
     
+    def annotate_ignore_statuses(self, messages: List[EmailMessage]) -> None:
+        """Set each message's `ignore_status` from the ignore store."""
+        statuses = self.message_ignores.get_statuses((m.provider, m.id) for m in messages)
+        for m in messages:
+            m.ignore_status = statuses.get((m.provider, m.id))
+
+    def mark_messages_seen_in_session(self, provider_name: str, message_ids: List[str]) -> None:
+        """Hide these messages until this process exits. Local only."""
+        self.message_ignores.mark_seen_in_session(provider_name, message_ids)
+        logger.info(f"Marked {len(message_ids)} {provider_name} message(s) seen in session")
+
+    def mark_messages_ignored(self, provider_name: str, message_ids: List[str]) -> None:
+        """Hide these messages persistently until unignored. Local only."""
+        self.message_ignores.mark_ignored(provider_name, message_ids)
+        logger.info(f"Marked {len(message_ids)} {provider_name} message(s) ignored")
+
+    def unignore_messages(self, provider_name: str, message_ids: List[str]) -> None:
+        """Clear both ignore statuses for these messages."""
+        self.message_ignores.unignore(provider_name, message_ids)
+        logger.info(f"Unignored {len(message_ids)} {provider_name} message(s)")
+
     def extract_entities(self, messages: List[EmailMessage]) -> int:
         """Run entity extraction over a list of messages. Returns job posting count.
 

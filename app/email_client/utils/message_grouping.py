@@ -50,6 +50,11 @@ class MessageGroup:
         return sum(1 for msg in self.messages if not msg.is_read)
 
     @property
+    def ignored_count(self) -> int:
+        """Number of messages in this group with any ignore status"""
+        return sum(1 for msg in self.messages if msg.ignore_status is not None)
+
+    @property
     def display_name(self) -> str:
         """Display name for the sender (extracted from email or use email)"""
         if len(self.sender_emails) > 1:
@@ -170,3 +175,26 @@ def merge_groups_by_domain(
 
     merged.sort(key=lambda g: g.latest_date, reverse=True)
     return merged
+
+
+def exclude_ignored_messages(groups: List[MessageGroup]) -> List[MessageGroup]:
+    """Drop messages with any ignore status (see
+    email_server.message_ignore_statuses), and groups left empty by that.
+
+    A group with nothing to drop is returned as the same object, so identity
+    comparisons against it keep working. Groups keep their order.
+    """
+    result: List[MessageGroup] = []
+    for group in groups:
+        visible = [m for m in group.messages if m.ignore_status is None]
+        if len(visible) == len(group.messages):
+            result.append(group)
+        elif visible:
+            result.append(MessageGroup(
+                sender_email=group.sender_email,
+                sender_domain=group.sender_domain,
+                messages=visible,
+                content_type=group.content_type,
+                sender_emails=group.sender_emails,
+            ))
+    return result

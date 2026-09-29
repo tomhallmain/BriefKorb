@@ -36,6 +36,10 @@
                 <input type="checkbox" name="oldest_first" value="true" {% if oldest_first %}checked{% endif %}>
                 Oldest first
             </label>
+            <label class="mr-2 ml-3">
+                <input type="checkbox" name="show_ignored" value="true" {% if show_ignored %}checked{% endif %}>
+                Show ignored
+            </label>
             <button type="submit" class="btn btn-secondary btn-sm ml-2">Update</button>
         </form>
 
@@ -46,11 +50,12 @@
         </p>
 
         {% for bucket in messageData %}
-            <details class="mb-2 border rounded p-2">
+            <details class="mb-2 border rounded p-2{% if bucket.ignoredCount and bucket.ignoredCount == bucket.count %} text-muted{% endif %}">
                 <summary>
                     <strong>{{ bucket.fromName }}</strong> ({{ bucket.fromAddress }})
                     <span class="badge badge-info">{{ bucket.provider }}</span>
                     &mdash; {{ bucket.count }} message(s)
+                    {% if bucket.ignoredCount %}<span class="badge badge-light">{{ bucket.ignoredCount }} ignored</span>{% endif %}
                 </summary>
                 <form method="post" class="mt-2 mb-2">
                     {% csrf_token %}
@@ -58,6 +63,13 @@
                     <button type="submit" name="markAsRead" class="btn btn-sm btn-outline-primary">Mark as Read</button>
                     <button type="submit" name="deleteMessage" class="btn btn-sm btn-outline-danger">Delete</button>
                     <button type="submit" name="deleteMessageBlockSender" class="btn btn-sm btn-outline-warning">Block + Delete</button>
+                    <button type="submit" name="seenInSession" class="btn btn-sm btn-outline-secondary"
+                            title="Hide until the BriefKorb web server restarts. Nothing changes in your mailbox.">Skip for Now</button>
+                    <button type="submit" name="markIgnored" class="btn btn-sm btn-outline-secondary"
+                            title="Hide until unignored. Nothing changes in your mailbox.">Ignore</button>
+                    {% if bucket.ignoredCount %}
+                        <button type="submit" name="unignore" class="btn btn-sm btn-outline-secondary">Unignore</button>
+                    {% endif %}
                 </form>
                 <ul class="list-unstyled mt-2 mb-0">
                     {% for m in bucket.messages %}
@@ -69,6 +81,8 @@
                                 <small class="text-muted">&mdash; {{ m.lastReceivedDateTime }}</small>
                             {% endif %}
                             {% if not m.isRead %}<span class="badge badge-primary">unread</span>{% endif %}
+                            {% if m.ignoreStatus == 'ignored' %}<span class="badge badge-light">ignored</span>
+                            {% elif m.ignoreStatus == 'seen_in_session' %}<span class="badge badge-light">skipped</span>{% endif %}
                         </li>
                     {% endfor %}
                 </ul>

@@ -73,6 +73,19 @@
                 <button type="submit" name="deleteMessageBlockSender" class="btn btn-warning btn-sm mb-3">Delete Messages And Block Senders</button>
             </div>
         </div>
+        <div class="row">
+            <div class="col">
+                <button type="submit" name="seenInSession" class="btn btn-outline-secondary btn-sm mb-3"
+                        title="Hide until the BriefKorb web server restarts. Nothing changes in your mailbox.">Skip For Now</button>
+            </div>
+            <div class="col">
+                <button type="submit" name="markIgnored" class="btn btn-outline-secondary btn-sm mb-3"
+                        title="Hide until unignored. Nothing changes in your mailbox.">Ignore Messages</button>
+            </div>
+            <div class="col">
+                <button type="submit" name="unignore" class="btn btn-outline-secondary btn-sm mb-3">Unignore Messages</button>
+            </div>
+        </div>
         <br>
         <div class="row">
             <div class="col">
@@ -110,6 +123,13 @@
                 </label>
                 <button type="submit" name="oldestFirst" class="btn btn-secondary btn-sm ml-2">Update</button>
             </div>
+            <div class="col">
+                <label>
+                    <input type="checkbox" name="showIgnored" value="showIgnored" {% if show_ignored %}checked{% endif %}>
+                    Show ignored
+                </label>
+                <button type="submit" name="showIgnored" class="btn btn-secondary btn-sm ml-2">Update</button>
+            </div>
         </div>
         <br>
         <table class="table sortable">
@@ -129,7 +149,7 @@
             <tbody>
                 {% if messageData %}
                     {% for messageInfo in messageData %}
-                        <tr class="sender-row" data-sender-key="{{ messageInfo.provider }}|{{ messageInfo.fromName }}">
+                        <tr class="sender-row{% if messageInfo.ignoredCount and messageInfo.ignoredCount == messageInfo.count %} text-muted{% endif %}" data-sender-key="{{ messageInfo.provider }}|{{ messageInfo.fromName }}">
                             <td>
                                 <input type="checkbox" name="selected_options" value="{{ messageInfo.provider }}|{{ messageInfo.fromName }}">
                             </td>
@@ -144,7 +164,10 @@
                                     N/A
                                 {% endif %}
                             </td>
-                            <td>{{ messageInfo.count }}</td>
+                            <td>
+                                {{ messageInfo.count }}
+                                {% if messageInfo.ignoredCount %}<span class="badge badge-light">{{ messageInfo.ignoredCount }} ignored</span>{% endif %}
+                            </td>
                             <td>
                                 <span class="badge {% if messageInfo.impact == 'high-impact' %}badge-danger{% elif messageInfo.impact == 'low-impact' %}badge-secondary{% else %}badge-light{% endif %}">
                                     {{ messageInfo.impact|default:'unclassified' }}
@@ -175,6 +198,9 @@
     <button type="button" data-action="markAsRead">Mark Group as Read</button>
     <button type="button" data-action="deleteMessage">Delete Group</button>
     <button type="button" data-action="deleteMessageBlockSender">Delete Group and Block Sender</button>
+    <button type="button" data-action="seenInSession">Skip Group for Now</button>
+    <button type="button" data-action="markIgnored">Ignore Group</button>
+    <button type="button" data-action="unignore">Unignore Group</button>
 </div>
 
 {% load static %}

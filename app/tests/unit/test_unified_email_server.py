@@ -1111,3 +1111,74 @@ def test_block_senders_still_locally_suppresses_when_gmail_durable_rule_fails(
     assert server.is_sender_blocked('alice@example.com') is True
     [event] = server.get_block_events(sender='alice@example.com')
     assert event['provider'] is None
+
+
+# --- ignore statuses ---------------------------------------------------------
+
+def _server_returning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, messages: List[EmailMessage]) -> UnifiedEmailServer:
+    server = _server(tmp_path)
+    provider = server.get_provider('microsoft')
+    server.token_manager.store_token('user1', {'access_token': 'at'})
+    monkeypatch.setattr(provider, 'authenticate', lambda user_id: True)
+    monkeypatch.setattr(provider, 'get_messages', lambda **kwargs: list(messages))
+    return server
+
+
+def test_get_user_messages_annotates_ignore_statuses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from email_server.message_ignore_statuses import IgnoreStatus
+
+    day = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    server = _server_returning(tmp_path, monkeypatch, [_message('m1', day), _message('m2', day), _message('m3', day)])
+    server.mark_messages_ignored('microsoft', ['m1'])
+    server.mark_messages_seen_in_session('microsoft', ['m2'])
+
+    statuses = {m.id: m.ignore_status for m in server.get_user_messages()}
+
+    assert statuses == {'m1': IgnoreStatus.IGNORED, 'm2': IgnoreStatus.SEEN_IN_SESSION, 'm3': None}
+
+
+def test_ignore_status_is_keyed_by_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server_returning(tmp_path, monkeypatch, [_message('m1', datetime(2024, 1, 1, tzinfo=timezone.utc))])
+    server.mark_messages_ignored('gmail', ['m1'])
+
+    assert server.get_user_messages()[0].ignore_status is None
+
+
+def test_unignore_messages_clears_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server_returning(tmp_path, monkeypatch, [_message('m1', datetime(2024, 1, 1, tzinfo=timezone.utc))])
+    server.mark_messages_ignored('microsoft', ['m1'])
+    server.mark_messages_seen_in_session('microsoft', ['m1'])
+
+    server.unignore_messages('microsoft', ['m1'])
+
+    assert server.get_user_messages()[0].ignore_status is None
+
+
+def test_get_message_digest_reports_ignore_status_and_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    day = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    server = _server_returning(tmp_path, monkeypatch, [_message('m1', day), _message('m2', day)])
+    server.mark_messages_ignored('microsoft', ['m1'])
+
+    digest = server.get_message_digest()
+
+    assert digest[0]['count'] == 2
+    assert digest[0]['ignoredCount'] == 1
+    assert {m['id']: m['ignoreStatus'] for m in digest[0]['messages']} == {'m1': 'ignored', 'm2': None}
+
+
+def test_get_message_digest_can_exclude_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    day = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    other = _message('x1', day)
+    other.sender = 'other@example.com'
+    server = _server_returning(tmp_path, monkeypatch, [_message('m1', day), _message('m2', day), other])
+    server.mark_messages_ignored('microsoft', ['m1'])
+    server.mark_messages_seen_in_session('microsoft', ['x1'])
+
+    digest = server.get_message_digest(include_ignored=False)
+
+    assert len(digest) == 1
+    assert digest[0]['fromAddress'] == 'a@example.com'
+    assert digest[0]['count'] == 1
+    assert digest[0]['ignoredCount'] == 0
+    assert [m['id'] for m in digest[0]['messages']] == ['m2']
+

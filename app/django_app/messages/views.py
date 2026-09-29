@@ -45,14 +45,52 @@ def _resolve_selected_buckets(
     return [b for b in digest if (b['provider'], b['fromName']) in selected_pairs]
 
 
+# Local-only ignore-status actions: no provider call, so they can't fail
+# per provider and don't need an authenticated user.
+_IGNORE_ACTION_LABELS = {
+    'seenInSession': 'skipped for this session',
+    'markIgnored': 'ignored',
+    'unignore': 'unignored',
+}
+
+# Every action name a messages/inbox POST may carry, in the order a form's
+# submit-button name is checked.
+_BULK_ACTIONS = ('markAsRead', 'deleteMessage', 'deleteMessageBlockSender', *_IGNORE_ACTION_LABELS)
+
+
+def _posted_action(post) -> Optional[str]:
+    """The bulk action named by whichever action submit button was pressed."""
+    return next((a for a in _BULK_ACTIONS if a in post), None)
+
+
+def _perform_ignore_action(request, server: UnifiedEmailServer, action: str, selected_buckets: List[Dict[str, Any]]) -> None:
+    ids_by_provider: Dict[str, List[str]] = {}
+    for bucket in selected_buckets:
+        ids_by_provider.setdefault(bucket['provider'], []).extend(m['id'] for m in bucket['messages'])
+    for provider_name, message_ids in ids_by_provider.items():
+        if action == 'seenInSession':
+            server.mark_messages_seen_in_session(provider_name, message_ids)
+        elif action == 'markIgnored':
+            server.mark_messages_ignored(provider_name, message_ids)
+        else:
+            server.unignore_messages(provider_name, message_ids)
+    sender_count = len(selected_buckets)
+    subject_desc = selected_buckets[0]['fromName'] if sender_count == 1 else f"{sender_count} sender(s)"
+    django_messages.success(request, f"Messages from {subject_desc} {_IGNORE_ACTION_LABELS[action]}.")
+
+
 def _perform_bulk_action(request, server: UnifiedEmailServer, action: str, selected_buckets: List[Dict[str, Any]]) -> None:
-    """Perform markAsRead/deleteMessage/deleteMessageBlockSender across
-    however many providers the selected buckets span, and flash a summary
-    message. One provider's block_senders() failing doesn't stop the other
-    providers' actions from running.
+    """Perform any _BULK_ACTIONS action across however many providers the
+    selected buckets span, and flash a summary message. One provider's
+    block_senders() failing doesn't stop the other providers' actions from
+    running.
     """
     if not selected_buckets:
         django_messages.error(request, "No matching messages found for the selected sender(s).")
+        return
+
+    if action in _IGNORE_ACTION_LABELS:
+        _perform_ignore_action(request, server, action, selected_buckets)
         return
 
     buckets_by_provider: Dict[str, List[Dict[str, Any]]] = {}
@@ -146,6 +184,7 @@ def messages_view(request, low_impact_only: bool = False):
     exclude_read = True
     high_impact_only = False
     oldest_first = False
+    show_ignored = False
     has_performed_update = False
 
     try:
@@ -165,6 +204,9 @@ def messages_view(request, low_impact_only: bool = False):
                 high_impact_only = bool(request.POST.getlist('highImpactOnly'))
             if 'oldestFirst' in request.POST:
                 oldest_first = bool(request.POST.getlist('oldestFirst'))
+            # The checkbox's own value, not mere key presence: the adjacent
+            # Update button posts `showIgnored=` too, even when unchecked.
+            show_ignored = 'showIgnored' in request.POST.getlist('showIgnored')
 
             set_impact_value = request.POST.get('setImpact', '').strip()
             clear_impact_sender = request.POST.get('clearImpact', '').strip()
@@ -191,12 +233,7 @@ def messages_view(request, low_impact_only: bool = False):
                 action = context_action
             elif 'selected_options' in request.POST:
                 selected_keys = request.POST.getlist('selected_options')
-                if 'markAsRead' in request.POST:
-                    action = 'markAsRead'
-                elif 'deleteMessage' in request.POST:
-                    action = 'deleteMessage'
-                elif 'deleteMessageBlockSender' in request.POST:
-                    action = 'deleteMessageBlockSender'
+                action = _posted_action(request.POST)
 
             if action and selected_keys:
                 selected_buckets = _resolve_selected_buckets(server, mailbox, selected_keys)
@@ -206,7 +243,7 @@ def messages_view(request, low_impact_only: bool = False):
         # Fetch fresh for display -- reflects any action just performed above,
         # or is simply the normal display fetch if this was a GET/filter-only request.
         messages = server.get_user_messages(folder=mailbox, unread_only=exclude_read, max_messages=config.max_messages)
-        message_data = server.get_message_digest(messages=messages)
+        message_data = server.get_message_digest(messages=messages, include_ignored=show_ignored)
         message_data = annotate_sender_impact(message_data, sender_categorization)
         if low_impact_only:
             message_data = [
@@ -254,6 +291,7 @@ def messages_view(request, low_impact_only: bool = False):
             'exclude_read_messages': exclude_read,
             'high_impact_only': high_impact_only,
             'oldest_first': oldest_first,
+            'show_ignored': show_ignored,
             'low_impact_only': low_impact_only,
             'has_performed_update': has_performed_update,
             'is_authenticated': True,
@@ -362,6 +400,9 @@ def messages_api_view(request):
       computed even without `includeResponseStatus`).
     - `staleAfterDays`: threshold (in days) for the above two signals,
       default 3.0.
+    - `excludeIgnored`: drop messages the user marked ignored or skipped
+      in the web app's current server session (default false). Every
+      message summary carries `ignoreStatus` either way.
     """
     config, error = _load_config()
     if error:
@@ -380,6 +421,7 @@ def messages_api_view(request):
     awaiting_your_reply_only = _parse_bool_param(request, 'awaitingYourReply', default=False)
     awaiting_their_reply_only = _parse_bool_param(request, 'awaitingTheirReply', default=False)
     stale_after_days = _parse_float_param(request, 'staleAfterDays', default=3.0)
+    exclude_ignored = _parse_bool_param(request, 'excludeIgnored', default=False)
 
     logger.info(
         f"GET /api/messages mailbox={mailbox} unread_only={unread_only} "
@@ -394,6 +436,7 @@ def messages_api_view(request):
             stale_after_days=stale_after_days,
             awaiting_your_reply_only=awaiting_your_reply_only,
             awaiting_their_reply_only=awaiting_their_reply_only,
+            include_ignored=not exclude_ignored,
         )
         sender_categorization = SenderCategorizationManager(config.token_storage_path)
         message_data = annotate_sender_impact(message_data, sender_categorization)
@@ -441,25 +484,20 @@ def inbox_view(request):
     mailbox = request.GET.get('mailbox', 'inbox')
     unread_only = _parse_bool_param(request, 'unread_only', default=True)
     oldest_first = _parse_bool_param(request, 'oldest_first', default=False)
+    show_ignored = _parse_bool_param(request, 'show_ignored', default=False)
 
     try:
         sender_categorization = SenderCategorizationManager(config.token_storage_path)
 
         if request.method == 'POST':
             sender_key = request.POST.get('sender_key', '').strip()
-            action = None
-            if 'markAsRead' in request.POST:
-                action = 'markAsRead'
-            elif 'deleteMessage' in request.POST:
-                action = 'deleteMessage'
-            elif 'deleteMessageBlockSender' in request.POST:
-                action = 'deleteMessageBlockSender'
+            action = _posted_action(request.POST)
             if action and sender_key:
                 selected_buckets = _resolve_selected_buckets(server, mailbox, [sender_key])
                 _perform_bulk_action(request, server, action, selected_buckets)
 
         messages = server.get_user_messages(folder=mailbox, unread_only=unread_only, max_messages=config.max_messages)
-        message_data = server.get_message_digest(messages=messages)
+        message_data = server.get_message_digest(messages=messages, include_ignored=show_ignored)
         message_data = annotate_sender_impact(message_data, sender_categorization)
         # Confirmed low-impact senders (subscriptions, ads, etc.) are hidden
         # from the default browse list -- see the low_impact_senders route
@@ -490,6 +528,7 @@ def inbox_view(request):
         'mailbox': mailbox,
         'unread_only': unread_only,
         'oldest_first': oldest_first,
+        'show_ignored': show_ignored,
         'entity_count': entity_count,
         'is_authenticated': True,
     })

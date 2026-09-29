@@ -316,6 +316,45 @@ def test_inbox_view_post_block_and_delete_action(client: Client, tmp_path: Path,
     }]
 
 
+@pytest.mark.parametrize('action, recorded', [
+    ('seenInSession', 'seen_in_session'),
+    ('markIgnored', 'ignored'),
+    ('unignore', 'unignore'),
+])
+def test_inbox_view_post_ignore_actions(
+    client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, action: str, recorded: str,
+) -> None:
+    _write_config(tmp_path)
+    _patch_impact_categorization(monkeypatch)
+    fake_server = FakeUnifiedEmailServer(
+        authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')],
+        digest=[_bucket_for_inbox('microsoft', 'Alice', 'a@example.com', ['m1', 'm2'])],
+    )
+    _patch_server(monkeypatch, fake_server)
+
+    response = client.post(reverse('django_app.messages:inbox'), {
+        'sender_key': 'microsoft|Alice', action: '1',
+    })
+
+    assert response.status_code == 200
+    assert fake_server.ignore_status_calls == [
+        {'action': recorded, 'provider_name': 'microsoft', 'message_ids': ['m1', 'm2']}
+    ]
+    assert fake_server.mark_messages_as_read_calls == []
+
+
+def test_inbox_view_show_ignored_query_param(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_config(tmp_path)
+    _patch_impact_categorization(monkeypatch)
+    fake_server = FakeUnifiedEmailServer(authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')])
+    _patch_server(monkeypatch, fake_server)
+
+    client.get(reverse('django_app.messages:inbox'))
+    client.get(reverse('django_app.messages:inbox') + '?show_ignored=true')
+
+    assert [c['include_ignored'] for c in fake_server.get_message_digest_calls] == [False, True]
+
+
 def test_inbox_view_get_does_not_trigger_any_action(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A plain GET (no action fields at all) must not accidentally resolve
     to an action -- 'action and sender_key' both being required guards

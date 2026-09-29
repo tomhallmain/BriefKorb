@@ -503,6 +503,95 @@ def test_messages_view_context_sender_takes_precedence_over_selected_options(cli
     assert fake_server.mark_messages_as_read_calls == [{'user_id': 'user1', 'provider_name': 'microsoft', 'message_ids': ['m1']}]
 
 
+
+# --- messages_view: ignore statuses ------------------------------------------
+
+def test_messages_view_hides_ignored_by_default(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_config(tmp_path)
+    _patch_sender_categorization(monkeypatch)
+    fake_server = FakeUnifiedEmailServer(authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')])
+    _patch_server(monkeypatch, fake_server)
+
+    response = client.get(reverse('django_app.messages:messages'))
+
+    assert fake_server.get_message_digest_calls[0]['include_ignored'] is False
+    assert response.context['show_ignored'] is False
+
+
+def test_messages_view_show_ignored_checkbox_includes_ignored(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_config(tmp_path)
+    _patch_sender_categorization(monkeypatch)
+    fake_server = FakeUnifiedEmailServer(authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')])
+    _patch_server(monkeypatch, fake_server)
+
+    response = client.post(reverse('django_app.messages:messages'), {'showIgnored': ['showIgnored', '']})
+
+    assert fake_server.get_message_digest_calls[-1]['include_ignored'] is True
+    assert response.context['show_ignored'] is True
+
+
+def test_messages_view_show_ignored_update_button_alone_does_not_enable_it(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The Update button posts `showIgnored=` even when the checkbox is unchecked.
+    _write_config(tmp_path)
+    _patch_sender_categorization(monkeypatch)
+    fake_server = FakeUnifiedEmailServer(authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')])
+    _patch_server(monkeypatch, fake_server)
+
+    response = client.post(reverse('django_app.messages:messages'), {'showIgnored': ''})
+
+    assert response.context['show_ignored'] is False
+
+
+@pytest.mark.parametrize('action, recorded', [
+    ('seenInSession', 'seen_in_session'),
+    ('markIgnored', 'ignored'),
+    ('unignore', 'unignore'),
+])
+def test_messages_view_post_context_ignore_actions(
+    client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, action: str, recorded: str,
+) -> None:
+    _write_config(tmp_path)
+    _patch_sender_categorization(monkeypatch)
+    fake_server = FakeUnifiedEmailServer(
+        authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')],
+        digest=[_bucket('microsoft', 'Alice', 'a@example.com', ['m1', 'm2'])],
+    )
+    _patch_server(monkeypatch, fake_server)
+
+    response = client.post(reverse('django_app.messages:messages'), {
+        'context_sender': 'microsoft|Alice', 'context_action': action,
+    })
+
+    assert fake_server.ignore_status_calls == [
+        {'action': recorded, 'provider_name': 'microsoft', 'message_ids': ['m1', 'm2']}
+    ]
+    assert fake_server.mark_messages_as_read_calls == []
+    assert fake_server.delete_user_messages_calls == []
+    assert response.context['has_performed_update'] is True
+
+
+def test_messages_view_post_bulk_ignore_spanning_two_providers(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_config(tmp_path)
+    _patch_sender_categorization(monkeypatch)
+    fake_server = FakeUnifiedEmailServer(
+        authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1'), FakeAuthenticatedProvider('gmail', 'user2')],
+        digest=[
+            _bucket('microsoft', 'Alice', 'a@example.com', ['m1']),
+            _bucket('gmail', 'Bob', 'b@example.com', ['g1']),
+        ],
+    )
+    _patch_server(monkeypatch, fake_server)
+
+    client.post(reverse('django_app.messages:messages'), {
+        'selected_options': ['microsoft|Alice', 'gmail|Bob'], 'markIgnored': '',
+    })
+
+    assert sorted(fake_server.ignore_status_calls, key=lambda c: c['provider_name']) == [
+        {'action': 'ignored', 'provider_name': 'gmail', 'message_ids': ['g1']},
+        {'action': 'ignored', 'provider_name': 'microsoft', 'message_ids': ['m1']},
+    ]
+
+
 # --- messages_api_view (GET /api/messages, external bearer-token auth) -------
 #
 # Auth (require_external_api_token) has its own dedicated coverage in
@@ -604,6 +693,7 @@ def test_messages_api_view_passes_query_params_to_digest(client: Client, tmp_pat
         'sender_search': None, 'subject_keyword': None,
         'include_response_status': False, 'stale_after_days': 3.0,
         'awaiting_your_reply_only': False, 'awaiting_their_reply_only': False,
+        'include_ignored': True,
     }]
 
 
@@ -690,3 +780,14 @@ def test_messages_api_view_returns_502_when_digest_raises(client: Client, tmp_pa
 
     assert response.status_code == 502
     assert 'graph api down' in response.json()['error']
+
+
+def test_messages_api_view_exclude_ignored_param(client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_external_api_config(tmp_path)
+    _patch_sender_categorization(monkeypatch)
+    fake_server = FakeUnifiedEmailServer(authenticated_providers=[FakeAuthenticatedProvider('microsoft', 'user1')])
+    _patch_server(monkeypatch, fake_server)
+
+    client.get(reverse('django_app.messages:messages_api') + '?excludeIgnored=true', **_auth_header())
+
+    assert fake_server.get_message_digest_calls[0]['include_ignored'] is False

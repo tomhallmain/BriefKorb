@@ -58,6 +58,7 @@ class FakeUnifiedEmailServer:
         self.delete_user_messages_calls: List[Dict[str, Any]] = []
         self.block_senders_calls: List[Dict[str, Any]] = []
         self.unblock_sender_calls: List[str] = []
+        self.ignore_status_calls: List[Dict[str, Any]] = []
 
     def get_authenticated_providers(self, provider_name: Optional[str] = None) -> List[FakeAuthenticatedProvider]:
         if provider_name is None:
@@ -117,6 +118,16 @@ class FakeUnifiedEmailServer:
             {**s, 'is_locally_blocked': False} if s['sender'] == email.lower() else s
             for s in self._blocked_sender_summary
         ]
+
+
+    def mark_messages_seen_in_session(self, provider_name: str, message_ids: List[str]) -> None:
+        self.ignore_status_calls.append({'action': 'seen_in_session', 'provider_name': provider_name, 'message_ids': message_ids})
+
+    def mark_messages_ignored(self, provider_name: str, message_ids: List[str]) -> None:
+        self.ignore_status_calls.append({'action': 'ignored', 'provider_name': provider_name, 'message_ids': message_ids})
+
+    def unignore_messages(self, provider_name: str, message_ids: List[str]) -> None:
+        self.ignore_status_calls.append({'action': 'unignore', 'provider_name': provider_name, 'message_ids': message_ids})
 
 
 def patch_server(monkeypatch: pytest.MonkeyPatch, fake_server: FakeUnifiedEmailServer) -> None:

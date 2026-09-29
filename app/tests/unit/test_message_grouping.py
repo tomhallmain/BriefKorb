@@ -13,8 +13,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import List
 
-from email_client.utils.message_grouping import MessageGroup, merge_groups_by_domain
+from email_client.utils.message_grouping import MessageGroup, exclude_ignored_messages, merge_groups_by_domain
 from email_server import EmailMessage
+from email_server.message_ignore_statuses import IgnoreStatus
 
 
 def _message(msg_id: str, sender: str) -> EmailMessage:
@@ -160,3 +161,43 @@ def test_result_groups_sorted_by_latest_date_most_recent_first() -> None:
     merged = merge_groups_by_domain(groups, _no_personal_domains)
 
     assert [g.sender_domain for g in merged] == ["other.com", "acme.com"]
+
+
+# --- exclude_ignored_messages ----------------------------------------------------
+
+def test_exclude_ignored_passes_untouched_groups_through_as_same_object() -> None:
+    group = _sender_group("a@x.com", "x.com", ["1", "2"])
+
+    assert exclude_ignored_messages([group])[0] is group
+
+
+def test_exclude_ignored_drops_ignored_messages_and_keeps_group_fields() -> None:
+    group = _sender_group("a@x.com", "x.com", ["1", "2", "3"])
+    group.sender_emails = ("a@x.com", "b@x.com")
+    group.messages[0].ignore_status = IgnoreStatus.IGNORED
+    group.messages[2].ignore_status = IgnoreStatus.SEEN_IN_SESSION
+
+    [result] = exclude_ignored_messages([group])
+
+    assert [m.id for m in result.messages] == ["2"]
+    assert result.sender_email == "a@x.com"
+    assert result.sender_emails == ("a@x.com", "b@x.com")
+    assert group.count == 3
+
+
+def test_exclude_ignored_drops_fully_ignored_groups_and_keeps_order() -> None:
+    first = _sender_group("a@x.com", "x.com", ["1"])
+    hidden = _sender_group("b@y.com", "y.com", ["2"])
+    last = _sender_group("c@z.com", "z.com", ["3"])
+    hidden.messages[0].ignore_status = IgnoreStatus.IGNORED
+
+    assert exclude_ignored_messages([first, hidden, last]) == [first, last]
+
+
+def test_ignored_count_counts_both_statuses() -> None:
+    group = _sender_group("a@x.com", "x.com", ["1", "2", "3"])
+    group.messages[0].ignore_status = IgnoreStatus.IGNORED
+    group.messages[1].ignore_status = IgnoreStatus.SEEN_IN_SESSION
+
+    assert group.ignored_count == 2
+

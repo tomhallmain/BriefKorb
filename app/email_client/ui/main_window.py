@@ -21,6 +21,7 @@ from PySide6.QtGui import QFont, QTextDocument
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from email_server import UnifiedEmailServer, EmailMessage, AuthenticatedProvider
 from email_server.config import EmailServerConfig
+from email_server.message_ignore_statuses import IgnoreStatus
 from lib.multi_display_qt import SmartMainWindow
 
 from widgets.message_list_item import MessageListItem
@@ -31,7 +32,9 @@ from ui.sender_categorization_window import SenderCategorizationWindow
 from ui.blocked_senders_window import BlockedSendersWindow
 from ui.low_impact_senders_window import LowImpactSendersWindow
 from email_client.utils.scope_checker import ScopeChecker
-from email_client.utils.message_grouping import MessageGroup, group_messages_by_sender, merge_groups_by_domain, extract_sender_email
+from email_client.utils.message_grouping import (
+    MessageGroup, group_messages_by_sender, merge_groups_by_domain, extract_sender_email, exclude_ignored_messages,
+)
 from email_client.utils.content_type import ContentType
 from email_client.utils.workers import EmailWorkerThread, MessageBodyWorkerThread, EntityExtractionWorkerThread, DEFAULT_MAX_MESSAGES
 from email_client.utils.html_utils import sanitize_html, convert_plain_text_to_html, is_html_content, strip_images_for_debug
@@ -267,6 +270,14 @@ class MainWindow(SmartMainWindow):
         )
         self.group_by_domain_checkbox.toggled.connect(self._on_group_by_domain_toggled)
         filter_layout.addWidget(self.group_by_domain_checkbox)
+        self.show_ignored_checkbox = QPushButton("Show Ignored")
+        self.show_ignored_checkbox.setCheckable(True)
+        self.show_ignored_checkbox.setToolTip(
+            "Include messages you skipped for this session or marked ignored. "
+            "They are hidden by default."
+        )
+        self.show_ignored_checkbox.toggled.connect(self._on_show_ignored_toggled)
+        filter_layout.addWidget(self.show_ignored_checkbox)
         self.unread_only_checkbox.toggled.connect(self._sync_filter_button_labels)
         filter_layout.addStretch()
         layout.addLayout(filter_layout)
@@ -341,6 +352,18 @@ class MainWindow(SmartMainWindow):
         self.mark_all_read_btn.clicked.connect(self._mark_group_as_read)
         self.mark_all_read_btn.setEnabled(False)
         header_layout.addWidget(self.mark_all_read_btn)
+
+        self.skip_btn = QPushButton("Skip for Now")
+        self.skip_btn.setToolTip("Hide this message until the app is closed. Nothing changes in your mailbox.")
+        self.skip_btn.clicked.connect(self._skip_message)
+        self.skip_btn.setEnabled(False)
+        header_layout.addWidget(self.skip_btn)
+
+        self.ignore_btn = QPushButton("Ignore")
+        self.ignore_btn.setToolTip("Hide this message until unignored. Nothing changes in your mailbox.")
+        self.ignore_btn.clicked.connect(self._toggle_message_ignored)
+        self.ignore_btn.setEnabled(False)
+        header_layout.addWidget(self.ignore_btn)
 
         self.delete_btn = QPushButton("Delete")
         self.delete_btn.clicked.connect(self._delete_message)
@@ -524,7 +547,7 @@ class MainWindow(SmartMainWindow):
         
         # Delete button is updated when a message is selected
         if hasattr(self, 'delete_btn'):
-            self.delete_btn.setEnabled(can_delete and hasattr(self, 'current_selected_message'))
+            self.delete_btn.setEnabled(can_delete and getattr(self, 'current_selected_message', None) is not None)
             if not can_delete:
                 self.delete_btn.setToolTip("Delete permission not available. Configure scopes in Settings.")
             else:
@@ -756,6 +779,9 @@ class MainWindow(SmartMainWindow):
             unread_indicator = "●" if group.unread_count > 0 else "○"
             date_str = group.latest_date.strftime("%Y-%m-%d %H:%M")
             display_text = f"{unread_indicator} {group.display_name} ({group.count} messages) - {date_str}"
+            ignored_count = group.ignored_count
+            if ignored_count:
+                display_text += f" [{ignored_count} ignored]"
             
             item = QListWidgetItem(display_text)
             item.setData(Qt.UserRole, group)  # Store group reference
@@ -763,6 +789,8 @@ class MainWindow(SmartMainWindow):
                 font = QFont()
                 font.setBold(True)
                 item.setFont(font)
+            if ignored_count == group.count:
+                item.setForeground(Qt.GlobalColor.gray)
             
             # Tooltip with group details
             tooltip = f"Sender: {group.display_name}\n"
@@ -866,6 +894,11 @@ class MainWindow(SmartMainWindow):
         actions["mark_read"] = menu.addAction("Mark Group as Read")
         actions["delete"] = menu.addAction("Delete Group")
         actions["block"] = menu.addAction("Block Sender and Delete Group")
+        menu.addSeparator()
+        actions["skip"] = menu.addAction("Skip Group for Now")
+        actions["ignore"] = menu.addAction("Ignore Group")
+        actions["unignore"] = menu.addAction("Unignore Group")
+        actions["unignore"].setEnabled(group.ignored_count > 0)
 
         if self.sender_categorization:
             menu.addSeparator()
@@ -900,6 +933,12 @@ class MainWindow(SmartMainWindow):
             self._delete_group_for_group(group)
         elif selected_action is actions.get("block"):
             self._block_sender_for_group(group)
+        elif selected_action is actions.get("skip"):
+            self._apply_ignore_action(group.messages, IgnoreStatus.SEEN_IN_SESSION)
+        elif selected_action is actions.get("ignore"):
+            self._apply_ignore_action(group.messages, IgnoreStatus.IGNORED)
+        elif selected_action is actions.get("unignore"):
+            self._apply_ignore_action(group.messages, None)
         elif self.sender_categorization and selected_action is actions.get("high_impact"):
             self.sender_categorization.set_sender_exception(group.sender_email, ImpactLevel.HIGH_IMPACT)
             self._update_message_list()
@@ -954,6 +993,10 @@ class MainWindow(SmartMainWindow):
         metadata += f"Date: {message.received_date.strftime('%Y-%m-%d %H:%M:%S')}\n"
         metadata += f"Provider: {message.provider}\n"
         metadata += f"Status: {'Read' if message.is_read else 'Unread'}\n"
+        if message.ignore_status is IgnoreStatus.IGNORED:
+            metadata += "Ignored\n"
+        elif message.ignore_status is IgnoreStatus.SEEN_IN_SESSION:
+            metadata += "Skipped for this session\n"
         metadata += f"Group: {group.count} messages from {group.display_name}"
         self.metadata_label.setText(metadata)
 
@@ -991,6 +1034,9 @@ class MainWindow(SmartMainWindow):
         self.mark_all_read_btn.setEnabled(True)
         self.delete_all_btn.setEnabled(True)
         self.block_btn.setEnabled(True)
+        self.skip_btn.setEnabled(message.ignore_status is None)
+        self.ignore_btn.setEnabled(True)
+        self.ignore_btn.setText("Unignore" if message.ignore_status is not None else "Ignore")
 
         # Check delete permission for this message's provider
         if self.config:
@@ -1153,7 +1199,7 @@ class MainWindow(SmartMainWindow):
 
     def _mark_as_read(self):
         """Mark selected message as read"""
-        if not hasattr(self, 'current_selected_message'):
+        if getattr(self, 'current_selected_message', None) is None:
             return
         
         message = self.current_selected_message
@@ -1307,19 +1353,7 @@ class MainWindow(SmartMainWindow):
 
         self._update_message_list()
         if was_selected_group:
-            self.message_body.clear()
-            self.subject_label.setText("Select a message group to view")
-            self.metadata_label.clear()
-            self.message_nav_label.setText("No messages")
-            self.first_msg_btn.setEnabled(False)
-            self.prev_msg_btn.setEnabled(False)
-            self.next_msg_btn.setEnabled(False)
-            self.last_msg_btn.setEnabled(False)
-            self.mark_read_btn.setEnabled(False)
-            self.mark_all_read_btn.setEnabled(False)
-            self.delete_all_btn.setEnabled(False)
-            self.block_btn.setEnabled(False)
-            self.delete_btn.setEnabled(False)
+            self._clear_message_detail()
         self._backfill_messages_if_below_limit()
         return all_succeeded
 
@@ -1427,7 +1461,7 @@ class MainWindow(SmartMainWindow):
 
     def _delete_message(self):
         """Delete selected message"""
-        if not hasattr(self, 'current_selected_message'):
+        if getattr(self, 'current_selected_message', None) is None:
             return
         
         message = self.current_selected_message
@@ -1495,19 +1529,7 @@ class MainWindow(SmartMainWindow):
                 if self.current_group_index is not None and self.current_group_index < len(self.current_groups):
                     self._display_current_message()
                 else:
-                    self.message_body.clear()
-                    self.subject_label.setText("Select a message group to view")
-                    self.metadata_label.clear()
-                    self.message_nav_label.setText("No messages")
-                    self.first_msg_btn.setEnabled(False)
-                    self.prev_msg_btn.setEnabled(False)
-                    self.next_msg_btn.setEnabled(False)
-                    self.last_msg_btn.setEnabled(False)
-                    self.mark_read_btn.setEnabled(False)
-                    self.mark_all_read_btn.setEnabled(False)
-                    self.delete_all_btn.setEnabled(False)
-                    self.block_btn.setEnabled(False)
-                    self.delete_btn.setEnabled(False)
+                    self._clear_message_detail()
                 
                 self.statusBar.showMessage("Message deleted")
                 self._backfill_messages_if_below_limit()
@@ -1643,40 +1665,125 @@ class MainWindow(SmartMainWindow):
         self.group_by_domain_checkbox.setText(
             "Group by Domain (on)" if self.group_by_domain_checkbox.isChecked() else "Group by Domain"
         )
+        self.show_ignored_checkbox.setText(
+            "Show Ignored (on)" if self.show_ignored_checkbox.isChecked() else "Show Ignored"
+        )
 
     def _rebuild_current_groups(self) -> None:
         """Recompute self.current_groups from self._sender_groups (always
-        the real per-sender grouping), applying "Group by Domain" if
-        active. Categorization/inference always runs against
-        self._sender_groups directly, never against this method's output --
-        see merge_groups_by_domain()'s docstring for why."""
+        the real per-sender grouping), dropping ignored messages unless
+        "Show Ignored" is on, then applying "Group by Domain" if active.
+        Categorization/inference always runs against self._sender_groups
+        directly, never against this method's output -- see
+        merge_groups_by_domain()'s docstring for why."""
+        groups = self._sender_groups
+        if not self.show_ignored_checkbox.isChecked():
+            groups = exclude_ignored_messages(groups)
         if self.group_by_domain_checkbox.isChecked() and self.sender_categorization:
             self.current_groups = merge_groups_by_domain(
-                self._sender_groups, self.sender_categorization.is_personal_mailbox_domain
+                groups, self.sender_categorization.is_personal_mailbox_domain
             )
         else:
-            self.current_groups = self._sender_groups
+            self.current_groups = groups
+
+    def _clear_message_detail(self) -> None:
+        """Deselect and empty the detail panel, disabling its actions."""
+        self.current_group_index = None
+        self.current_message_index = 0
+        # So re-selecting the same message later reloads its body into the
+        # now-empty panel (see _display_current_message's same-message check).
+        self.current_selected_message = None
+        self.message_body.clear()
+        self.subject_label.setText("Select a message group to view")
+        self.metadata_label.clear()
+        self.message_nav_label.setText("No messages")
+        for button in (
+            self.first_msg_btn, self.prev_msg_btn, self.next_msg_btn, self.last_msg_btn,
+            self.mark_read_btn, self.mark_all_read_btn, self.skip_btn, self.ignore_btn,
+            self.delete_all_btn, self.block_btn, self.delete_btn,
+        ):
+            button.setEnabled(False)
+
+    def _on_show_ignored_toggled(self, checked: bool) -> None:
+        self._sync_filter_button_labels()
+        self._refresh_groups_keeping_selection()
+
+    def _refresh_groups_keeping_selection(self) -> None:
+        """Rebuild the displayed groups, keeping the selected message if it
+        is still shown. If only its group remains, the message now at the
+        same position is shown (the next one, when the selected one was
+        hidden). If the group is gone, the detail panel is cleared."""
+        selected_sender = None
+        if self.current_group_index is not None and self.current_group_index < len(self.current_groups):
+            selected_sender = self.current_groups[self.current_group_index].sender_email
+        selected_message = getattr(self, 'current_selected_message', None)
+        previous_index = self.current_message_index
+
+        self._rebuild_current_groups()
+        self._update_message_list()
+        if selected_sender is None:
+            return
+
+        group_index = next(
+            (i for i, g in enumerate(self.current_groups) if g.sender_email == selected_sender), None
+        )
+        if group_index is None:
+            self._clear_message_detail()
+            return
+        group = self.current_groups[group_index]
+        self.current_group_index = group_index
+        if any(m is selected_message for m in group.messages):
+            self.current_message_index = next(i for i, m in enumerate(group.messages) if m is selected_message)
+        else:
+            self.current_message_index = min(previous_index, len(group.messages) - 1)
+        self._display_current_message()
+
+    def _apply_ignore_action(self, messages: List[EmailMessage], status: Optional[IgnoreStatus]) -> None:
+        """Set `status` on these messages (None unignores them), then
+        refresh the list. Local only -- no provider call."""
+        if not self.server or not messages:
+            return
+        by_provider: dict = {}
+        for message in messages:
+            by_provider.setdefault(message.provider, []).append(message.id)
+        for provider_name, message_ids in by_provider.items():
+            if status is IgnoreStatus.SEEN_IN_SESSION:
+                self.server.mark_messages_seen_in_session(provider_name, message_ids)
+            elif status is IgnoreStatus.IGNORED:
+                self.server.mark_messages_ignored(provider_name, message_ids)
+            else:
+                self.server.unignore_messages(provider_name, message_ids)
+        # Re-read rather than assign `status`: IGNORED outranks a later
+        # SEEN_IN_SESSION mark on the same message.
+        self.server.annotate_ignore_statuses(messages)
+        self._refresh_groups_keeping_selection()
+
+        verb = {
+            IgnoreStatus.SEEN_IN_SESSION: "Skipped for this session",
+            IgnoreStatus.IGNORED: "Ignored",
+            None: "Unignored",
+        }[status]
+        self.statusBar.showMessage(f"{verb}: {len(messages)} message(s)")
+
+    def _skip_message(self):
+        """Mark the selected message seen-in-session."""
+        message = getattr(self, 'current_selected_message', None)
+        if message is not None:
+            self._apply_ignore_action([message], IgnoreStatus.SEEN_IN_SESSION)
+
+    def _toggle_message_ignored(self):
+        """Ignore the selected message, or unignore it if it has any ignore status."""
+        message = getattr(self, 'current_selected_message', None)
+        if message is None:
+            return
+        self._apply_ignore_action([message], None if message.ignore_status is not None else IgnoreStatus.IGNORED)
 
     def _on_group_by_domain_toggled(self, checked: bool) -> None:
         self._sync_filter_button_labels()
         # Group boundaries change entirely between modes -- carrying a
         # selection over across them isn't meaningful, so reset it the same
         # way _do_delete_group()/_delete_message() do when a group goes away.
-        self.current_group_index = None
-        self.current_message_index = 0
-        self.message_body.clear()
-        self.subject_label.setText("Select a message group to view")
-        self.metadata_label.clear()
-        self.message_nav_label.setText("No messages")
-        self.first_msg_btn.setEnabled(False)
-        self.prev_msg_btn.setEnabled(False)
-        self.next_msg_btn.setEnabled(False)
-        self.last_msg_btn.setEnabled(False)
-        self.mark_read_btn.setEnabled(False)
-        self.mark_all_read_btn.setEnabled(False)
-        self.delete_all_btn.setEnabled(False)
-        self.block_btn.setEnabled(False)
-        self.delete_btn.setEnabled(False)
+        self._clear_message_detail()
         self._rebuild_current_groups()
         self._update_message_list()
 
