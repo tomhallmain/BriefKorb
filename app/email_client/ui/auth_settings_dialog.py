@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QComboBox, QMessageBox, QTabWidget, QWidget,
     QCheckBox, QListWidget, QListWidgetItem, QFileDialog,
-    QTextEdit, QGroupBox, QFormLayout, QSpinBox
+    QTextEdit, QGroupBox, QFormLayout, QSpinBox, QApplication
 )
 from PySide6.QtCore import Qt, QUrl, QTimer
 from PySide6.QtGui import QDesktopServices
@@ -60,6 +60,10 @@ class AuthSettingsDialog(QDialog):
         # General settings tab
         general_tab = self._create_general_tab()
         self.tabs.addTab(general_tab, "General")
+
+        # External API tokens for other applications calling BriefKorb
+        external_api_tab = self._create_external_api_tab()
+        self.tabs.addTab(external_api_tab, "External API")
         
         layout.addWidget(self.tabs)
         
@@ -226,6 +230,128 @@ class AuthSettingsDialog(QDialog):
         layout.addStretch()
         
         return widget
+
+    def _create_external_api_tab(self) -> QWidget:
+        """Create the tab for inbound API tokens (other apps calling BriefKorb)."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        help_label = QLabel(
+            "Tokens let other applications call BriefKorb's API "
+            "(for example GET /api/messages) with an Authorization: Bearer header. "
+            "Each token is a secret shown in full only once, when it is generated."
+        )
+        help_label.setWordWrap(True)
+        layout.addWidget(help_label)
+
+        self.external_api_enabled = QCheckBox("Enable external API")
+        layout.addWidget(self.external_api_enabled)
+
+        layout.addWidget(QLabel("Registered tokens:"))
+        self.api_token_list = QListWidget()
+        layout.addWidget(self.api_token_list)
+
+        self.api_token_empty = QLabel("No tokens registered.")
+        self.api_token_empty.setStyleSheet("color: #888; font-style: italic;")
+        layout.addWidget(self.api_token_empty)
+
+        revoke_layout = QHBoxLayout()
+        revoke_layout.addStretch()
+        self.revoke_api_token_btn = QPushButton("Revoke selected")
+        self.revoke_api_token_btn.clicked.connect(self._revoke_selected_api_token)
+        revoke_layout.addWidget(self.revoke_api_token_btn)
+        layout.addLayout(revoke_layout)
+
+        generate_form = QFormLayout()
+        self.api_token_label = QLineEdit()
+        self.api_token_label.setPlaceholderText("e.g. the application that will call BriefKorb")
+        generate_form.addRow("Label:", self.api_token_label)
+        layout.addLayout(generate_form)
+
+        generate_layout = QHBoxLayout()
+        generate_layout.addStretch()
+        self.generate_api_token_btn = QPushButton("Generate token")
+        self.generate_api_token_btn.clicked.connect(self._generate_api_token)
+        generate_layout.addWidget(self.generate_api_token_btn)
+        layout.addLayout(generate_layout)
+
+        layout.addStretch()
+        return widget
+
+    def _refresh_api_token_list(self):
+        """Rebuild the token list from config. Never puts the full secret in the list."""
+        self.api_token_list.clear()
+        tokens = self.config.external_api.tokens
+        self.api_token_empty.setVisible(not tokens)
+        self.api_token_list.setVisible(bool(tokens))
+        self.revoke_api_token_btn.setEnabled(bool(tokens))
+        for i, registered in enumerate(tokens):
+            item = QListWidgetItem(f"{registered.display_label()}  {registered.masked_token()}")
+            item.setData(Qt.UserRole, i)
+            self.api_token_list.addItem(item)
+
+    def _persist_external_api(self) -> bool:
+        """Write the current config (including token list) to disk."""
+        try:
+            self.config.save(self.config_path)
+            return True
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save configuration:\n{str(e)}")
+            return False
+
+    def _generate_api_token(self):
+        """Mint a token, persist it immediately, and show the plaintext once."""
+        label = self.api_token_label.text().strip()
+        was_enabled = self.config.external_api.enabled
+        try:
+            token = self.config.external_api.generate_token(label=label)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to generate token:\n{str(e)}")
+            return
+        if not self._persist_external_api():
+            self.config.external_api.tokens.pop()
+            self.config.external_api.enabled = was_enabled
+            return
+        self.external_api_enabled.setChecked(self.config.external_api.enabled)
+        self.api_token_label.clear()
+        self._refresh_api_token_list()
+        clipboard = QApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(token)
+        QMessageBox.information(
+            self,
+            "API token generated",
+            "Copy this token now — it will not be shown again.\n"
+            "It has also been copied to the clipboard.\n\n"
+            f"{token}",
+        )
+
+    def _revoke_selected_api_token(self):
+        """Remove the selected token and persist immediately."""
+        row = self.api_token_list.currentRow()
+        if row < 0:
+            QMessageBox.information(
+                self,
+                "No token selected",
+                "Select a token to revoke.",
+            )
+            return
+        reply = QMessageBox.question(
+            self,
+            "Revoke token",
+            "Revoke this token? Applications using it will lose access immediately.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        removed = self.config.external_api.revoke_token_at(row)
+        if removed is None:
+            return
+        if not self._persist_external_api():
+            self.config.external_api.tokens.insert(row, removed)
+            return
+        self._refresh_api_token_list()
     
     def _browse_credentials_file(self):
         """Browse for Gmail credentials file"""
@@ -317,6 +443,9 @@ class AuthSettingsDialog(QDialog):
         if index >= 0:
             self.log_level.setCurrentIndex(index)
         self.max_messages.setValue(self.config.max_messages)
+
+        self.external_api_enabled.setChecked(self.config.external_api.enabled)
+        self._refresh_api_token_list()
     
     def _get_selected_scopes(self, scope_list: QListWidget) -> list[str]:
         """Get selected scopes from list widget"""
@@ -366,6 +495,7 @@ class AuthSettingsDialog(QDialog):
             self.config.token_storage_path = self.token_storage_path.text().strip() or "tokens"
             self.config.log_level = self.log_level.currentText().lower()
             self.config.max_messages = self.max_messages.value()
+            self.config.external_api.enabled = self.external_api_enabled.isChecked()
             
             # Validate
             try:

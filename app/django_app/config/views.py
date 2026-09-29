@@ -44,6 +44,45 @@ def _auth_status(config: EmailServerConfig) -> dict:
     return status
 
 
+def _apply_posted_settings(config: EmailServerConfig, post) -> None:
+    """Copy Microsoft / Gmail / general / external-API-enabled fields from POST.
+
+    Does not generate or revoke API tokens — those are separate POST actions
+    so a Save cannot accidentally mint a secret.
+    """
+    ms_scopes = post.getlist('ms_scopes')
+
+    config.microsoft = ProviderConfig(
+        enabled='ms_enabled' in post,
+        client_id=post.get('ms_client_id', '').strip() or None,
+        client_secret=post.get('ms_client_secret', '').strip() or None,
+        tenant_id=post.get('ms_tenant_id', '').strip() or None,
+        redirect_uri=post.get('ms_redirect_uri', '').strip() or None,
+        scopes=ms_scopes,
+        additional_settings=config.microsoft.additional_settings,
+    )
+
+    config.gmail = ProviderConfig(
+        enabled='gmail_enabled' in post,
+        credentials_path=post.get('gmail_credentials_path', '').strip() or None,
+        redirect_uri=post.get('gmail_redirect_uri', '').strip() or None,
+        scopes=post.getlist('gmail_scopes'),
+        additional_settings=config.gmail.additional_settings,
+    )
+
+    log_level = post.get('log_level', 'INFO')
+    if log_level not in LOG_LEVELS:
+        log_level = 'INFO'
+    config.token_storage_path = post.get('token_storage_path', 'tokens').strip() or 'tokens'
+    config.log_level = log_level.lower()
+    try:
+        config.max_messages = max(1, int(post.get('max_messages', config.max_messages)))
+    except ValueError:
+        pass
+
+    config.external_api.enabled = 'external_api_enabled' in post
+
+
 def settings_view(request):
     app_dir = _get_app_dir()
     config_path = EmailServerConfig.resolve_path(app_dir)
@@ -60,42 +99,33 @@ def settings_view(request):
     if request.method == 'POST':
         try:
             post = request.POST
+            _apply_posted_settings(config, post)
 
-            # --- Microsoft ---
-            ms_scopes = post.getlist('ms_scopes')
-
-            config.microsoft = ProviderConfig(
-                enabled='ms_enabled' in post,
-                client_id=post.get('ms_client_id', '').strip() or None,
-                client_secret=post.get('ms_client_secret', '').strip() or None,
-                tenant_id=post.get('ms_tenant_id', '').strip() or None,
-                redirect_uri=post.get('ms_redirect_uri', '').strip() or None,
-                scopes=ms_scopes,
-                additional_settings=config.microsoft.additional_settings,
-            )
-
-            # --- Gmail ---
-            config.gmail = ProviderConfig(
-                enabled='gmail_enabled' in post,
-                credentials_path=post.get('gmail_credentials_path', '').strip() or None,
-                redirect_uri=post.get('gmail_redirect_uri', '').strip() or None,
-                scopes=post.getlist('gmail_scopes'),
-                additional_settings=config.gmail.additional_settings,
-            )
-
-            # --- General ---
-            log_level = post.get('log_level', 'INFO')
-            if log_level not in LOG_LEVELS:
-                log_level = 'INFO'
-            config.token_storage_path = post.get('token_storage_path', 'tokens').strip() or 'tokens'
-            config.log_level = log_level.lower()
-            try:
-                config.max_messages = max(1, int(post.get('max_messages', config.max_messages)))
-            except ValueError:
-                pass
+            newly_generated = None
+            if 'generate_api_token' in post:
+                newly_generated = config.external_api.generate_token(
+                    label=post.get('api_token_label', ''),
+                )
+            elif 'revoke_api_token' in post:
+                try:
+                    index = int(post.get('revoke_api_token', ''))
+                except (TypeError, ValueError):
+                    index = -1
+                if config.external_api.revoke_token_at(index) is None:
+                    django_messages.error(request, 'Could not revoke that token.')
+                    return redirect('django_app.config:settings')
 
             config.save(str(config_path))
-            django_messages.success(request, 'Settings saved successfully.')
+            if newly_generated is not None:
+                request.session['newly_generated_api_token'] = newly_generated
+                django_messages.success(
+                    request,
+                    'Token generated. Copy it now; it will not be shown again.',
+                )
+            elif 'revoke_api_token' in post:
+                django_messages.success(request, 'Token revoked.')
+            else:
+                django_messages.success(request, 'Settings saved successfully.')
         except Exception as e:
             django_messages.error(request, f'Failed to save settings: {e}')
 
@@ -115,5 +145,14 @@ def settings_view(request):
         'log_levels': LOG_LEVELS,
         'ms_auth_user': auth_status['microsoft'],
         'gmail_auth_user': auth_status['gmail'],
+        'api_tokens': [
+            {
+                'index': i,
+                'label': registered.display_label(),
+                'masked': registered.masked_token(),
+            }
+            for i, registered in enumerate(config.external_api.tokens)
+        ],
+        'newly_generated_api_token': request.session.pop('newly_generated_api_token', None),
     }
     return render(request, 'django_app/config/settings.html', context)

@@ -39,8 +39,9 @@ max_messages: 200
 # `tokens` authorizes one external consumer to call BriefKorb's
 # external-facing API (e.g. GET /api/messages); `label` is free text used
 # only for logging which consumer made a call -- it grants no permissions
-# of its own. Add an entry per consumer; there is no limit to how many may
-# be registered.
+# of its own. Manage these from the desktop or web Settings page (External
+# API tab), or with scripts/generate_api_token.py. Add an entry per
+# consumer; there is no limit to how many may be registered.
 external_api:
   enabled: false
   tokens: []

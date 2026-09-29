@@ -22,8 +22,19 @@
   {% endfor %}
 {% endif %}
 
+{% if newly_generated_api_token %}
+  <div class="alert alert-warning">
+    <strong>Copy this token now — it will not be shown again.</strong>
+    <input type="text" class="form-control mt-2 font-monospace" readonly
+           value="{{ newly_generated_api_token }}"
+           onclick="this.select();" aria-label="Newly generated API token">
+  </div>
+{% endif %}
+
 <form method="post">
   {% csrf_token %}
+  {# First submit in the form is what Enter activates; keep Save ahead of Generate. #}
+  <button type="submit" name="save_settings" value="1" class="d-none" tabindex="-1" aria-hidden="true">Save</button>
 
   <ul class="nav nav-tabs" id="settingsTabs" role="tablist">
     <li class="nav-item">
@@ -34,6 +45,9 @@
     </li>
     <li class="nav-item">
       <a class="nav-link"        id="gen-tab"   data-toggle="tab" href="#general"   role="tab">General</a>
+    </li>
+    <li class="nav-item">
+      <a class="nav-link"        id="api-tab"   data-toggle="tab" href="#external-api" role="tab">External API</a>
     </li>
   </ul>
 
@@ -200,10 +214,73 @@
 
     </div><!-- /general -->
 
+    <!-- ── External API ── -->
+    <div class="tab-pane fade" id="external-api" role="tabpanel">
+
+      <p class="text-muted">
+        Tokens let other applications call BriefKorb's API
+        (for example <code>GET /api/messages</code>) with an
+        <code>Authorization: Bearer</code> header. Each token is a secret
+        shown in full only once, when it is generated.
+      </p>
+
+      <div class="form-group form-check">
+        <input type="checkbox" class="form-check-input" id="external_api_enabled" name="external_api_enabled"
+               {% if config.external_api.enabled %}checked{% endif %}>
+        <label class="form-check-label" for="external_api_enabled">Enable external API</label>
+      </div>
+
+      <h5 class="mt-4">Registered tokens</h5>
+      {% if api_tokens %}
+        <table class="table table-sm">
+          <thead>
+            <tr>
+              <th>Label</th>
+              <th>Token</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for registered in api_tokens %}
+              <tr>
+                <td>{{ registered.label }}</td>
+                <td><code>{{ registered.masked }}</code></td>
+                <td class="text-right">
+                  <button type="submit" class="btn btn-sm btn-outline-danger"
+                          name="revoke_api_token" value="{{ registered.index }}"
+                          onclick="return confirm('Revoke this token? Applications using it will lose access immediately.');">
+                    Revoke
+                  </button>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p class="text-muted font-italic">No tokens registered.</p>
+      {% endif %}
+
+      <h5 class="mt-4">Generate a token</h5>
+      <div class="form-row align-items-end">
+        <div class="form-group col-md-6">
+          <label for="api_token_label">Label</label>
+          <input type="text" class="form-control" id="api_token_label" name="api_token_label"
+                 placeholder="e.g. the application that will call BriefKorb">
+          <small class="form-text text-muted">Used only in logs to identify which consumer made a call.</small>
+        </div>
+        <div class="form-group col-md-auto">
+          <button type="submit" class="btn btn-outline-primary" name="generate_api_token" value="1">
+            Generate token
+          </button>
+        </div>
+      </div>
+
+    </div><!-- /external-api -->
+
   </div><!-- /tab-content -->
 
   <div class="mt-3">
-    <button type="submit" class="btn btn-primary">Save</button>
+    <button type="submit" name="save_settings" class="btn btn-primary">Save</button>
     <a href="{% url 'django_app.home:home' %}" class="btn btn-secondary ml-2">Cancel</a>
   </div>
 

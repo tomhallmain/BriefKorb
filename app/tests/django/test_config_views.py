@@ -21,7 +21,7 @@ from django.urls import reverse
 
 import email_server.config as config_module
 from email_server.auth import TokenManager
-from email_server.config import EmailServerConfig, ProviderConfig
+from email_server.config import EmailServerConfig, ExternalApiConfig, ExternalApiToken, ProviderConfig
 
 
 def _write_config(tmp_path: Path, token_dir: Path) -> EmailServerConfig:
@@ -166,3 +166,125 @@ def test_settings_view_post_reports_error_when_save_fails(client: Client, tmp_pa
 
     messages_shown = [str(m) for m in response.context['messages']]
     assert any('Failed to save settings' in m and 'disk full' in m for m in messages_shown)
+
+
+def test_settings_view_get_lists_api_tokens_masked_not_full(client: Client, tmp_path: Path) -> None:
+    EmailServerConfig(
+        microsoft=ProviderConfig(enabled=False),
+        gmail=ProviderConfig(enabled=False),
+        token_storage_path=str(tmp_path / 'tokens'),
+        external_api=ExternalApiConfig(
+            enabled=True,
+            tokens=[ExternalApiToken(token='abcdefghijklmnop', label='tagesform')],
+        ),
+    ).save(os.environ['BRIEFKORB_CONFIG_PATH'])
+
+    response = client.get(reverse('django_app.config:settings'))
+
+    assert response.status_code == 200
+    assert response.context['config'].external_api.enabled is True
+    assert response.context['api_tokens'] == [
+        {'index': 0, 'label': 'tagesform', 'masked': 'abcdef...mnop'},
+    ]
+    assert b'abcdefghijklmnop' not in response.content
+    assert b'abcdef...mnop' in response.content
+
+
+def test_settings_view_post_generate_api_token_enables_api_and_shows_secret_once(
+    client: Client, tmp_path: Path,
+) -> None:
+    response = client.post(reverse('django_app.config:settings'), {
+        'generate_api_token': '1',
+        'api_token_label': 'tagesform',
+        'token_storage_path': str(tmp_path / 'tokens'),
+    }, follow=True)
+
+    assert response.status_code == 200
+    saved = _read_saved_config()
+    assert saved.external_api.enabled is True
+    assert len(saved.external_api.tokens) == 1
+    assert saved.external_api.tokens[0].label == 'tagesform'
+    plaintext = saved.external_api.tokens[0].token
+    assert response.context['newly_generated_api_token'] == plaintext
+    assert plaintext.encode() in response.content
+    messages_shown = [str(m) for m in response.context['messages']]
+    assert any('Token generated' in m for m in messages_shown)
+
+    second = client.get(reverse('django_app.config:settings'))
+    assert second.context['newly_generated_api_token'] is None
+    assert plaintext.encode() not in second.content
+
+
+def test_settings_view_post_save_preserves_api_tokens_and_enabled_checkbox(
+    client: Client, tmp_path: Path,
+) -> None:
+    EmailServerConfig(
+        microsoft=ProviderConfig(enabled=False),
+        gmail=ProviderConfig(enabled=False),
+        token_storage_path=str(tmp_path / 'tokens'),
+        external_api=ExternalApiConfig(
+            enabled=False,
+            tokens=[ExternalApiToken(token='keep-this-token', label='existing')],
+        ),
+    ).save(os.environ['BRIEFKORB_CONFIG_PATH'])
+
+    client.post(reverse('django_app.config:settings'), {
+        'save_settings': '1',
+        'external_api_enabled': 'on',
+        'token_storage_path': str(tmp_path / 'tokens'),
+        'max_messages': '200',
+    })
+
+    saved = _read_saved_config()
+    assert saved.external_api.enabled is True
+    assert [t.token for t in saved.external_api.tokens] == ['keep-this-token']
+
+
+def test_settings_view_post_revoke_api_token(client: Client, tmp_path: Path) -> None:
+    EmailServerConfig(
+        microsoft=ProviderConfig(enabled=False),
+        gmail=ProviderConfig(enabled=False),
+        token_storage_path=str(tmp_path / 'tokens'),
+        external_api=ExternalApiConfig(
+            enabled=True,
+            tokens=[
+                ExternalApiToken(token='token-one', label='one'),
+                ExternalApiToken(token='token-two', label='two'),
+            ],
+        ),
+    ).save(os.environ['BRIEFKORB_CONFIG_PATH'])
+
+    response = client.post(reverse('django_app.config:settings'), {
+        'revoke_api_token': '0',
+        'external_api_enabled': 'on',
+        'token_storage_path': str(tmp_path / 'tokens'),
+    }, follow=True)
+
+    saved = _read_saved_config()
+    assert [t.label for t in saved.external_api.tokens] == ['two']
+    messages_shown = [str(m) for m in response.context['messages']]
+    assert any('Token revoked' in m for m in messages_shown)
+
+
+def test_settings_view_post_revoke_invalid_index_does_not_save(
+    client: Client, tmp_path: Path,
+) -> None:
+    EmailServerConfig(
+        microsoft=ProviderConfig(enabled=False),
+        gmail=ProviderConfig(enabled=False),
+        token_storage_path=str(tmp_path / 'tokens'),
+        external_api=ExternalApiConfig(
+            enabled=True,
+            tokens=[ExternalApiToken(token='token-one', label='one')],
+        ),
+    ).save(os.environ['BRIEFKORB_CONFIG_PATH'])
+
+    response = client.post(reverse('django_app.config:settings'), {
+        'revoke_api_token': 'not-an-index',
+        'token_storage_path': str(tmp_path / 'tokens'),
+    }, follow=True)
+
+    saved = _read_saved_config()
+    assert [t.token for t in saved.external_api.tokens] == ['token-one']
+    messages_shown = [str(m) for m in response.context['messages']]
+    assert any('Could not revoke' in m for m in messages_shown)

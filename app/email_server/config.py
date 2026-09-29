@@ -2,7 +2,9 @@
 Configuration management for the email server
 """
 
+import hmac
 import os
+import secrets
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,6 +36,16 @@ class ExternalApiToken:
     token: str
     label: str = ""
 
+    def masked_token(self) -> str:
+        """Truncated form for UI/CLI lists. The full secret is shown only
+        once, at generation time."""
+        if len(self.token) < 12:
+            return "****"
+        return f"{self.token[:6]}...{self.token[-4:]}"
+
+    def display_label(self) -> str:
+        return self.label or "(unlabeled)"
+
 @dataclass
 class ExternalApiConfig:
     """Config for BriefKorb's read-only external API.
@@ -45,6 +57,37 @@ class ExternalApiConfig:
     """
     enabled: bool = False
     tokens: List[ExternalApiToken] = field(default_factory=list)
+
+    def generate_token(self, label: str = "", nbytes: int = 32, enable: bool = True) -> str:
+        """Create a new bearer token, store it, and return the plaintext.
+
+        The plaintext is the caller's to show once; later lists should use
+        `ExternalApiToken.masked_token()`. When `enable` is true, turns the
+        external API on so the new token can actually be used.
+        """
+        token = None
+        for _ in range(5):
+            candidate = secrets.token_urlsafe(nbytes)
+            if not any(
+                len(existing.token) == len(candidate)
+                and hmac.compare_digest(existing.token, candidate)
+                for existing in self.tokens
+            ):
+                token = candidate
+                break
+        if token is None:
+            raise RuntimeError("Could not generate a unique API token")
+        self.tokens.append(ExternalApiToken(token=token, label=(label or "").strip()))
+        if enable:
+            self.enabled = True
+        return token
+
+    def revoke_token_at(self, index: int) -> Optional[ExternalApiToken]:
+        """Remove the token at `index`. Returns the removed entry, or None
+        if `index` is out of range."""
+        if 0 <= index < len(self.tokens):
+            return self.tokens.pop(index)
+        return None
 
 @dataclass
 class EmailServerConfig:

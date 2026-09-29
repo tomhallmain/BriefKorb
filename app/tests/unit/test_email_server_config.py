@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from email_server.config import EmailServerConfig, ProviderConfig
+from email_server.config import (
+    EmailServerConfig,
+    ExternalApiConfig,
+    ExternalApiToken,
+    ProviderConfig,
+)
 
 
 def _minimal_config_dict() -> dict:
@@ -220,3 +225,68 @@ def test_validate_creates_token_storage_directory(tmp_path: Path) -> None:
 
     assert config.validate() is True
     assert token_dir.is_dir()
+
+
+def test_masked_token_hides_the_middle_of_a_secret() -> None:
+    token = ExternalApiToken(token='abcdefghijklmnop', label='tagesform')
+
+    assert token.masked_token() == 'abcdef...mnop'
+    assert token.display_label() == 'tagesform'
+
+
+def test_masked_token_for_short_secret_is_fully_redacted() -> None:
+    assert ExternalApiToken(token='short', label='').masked_token() == '****'
+    assert ExternalApiToken(token='short').display_label() == '(unlabeled)'
+
+
+def test_generate_token_stores_stripped_label_and_enables_api() -> None:
+    external_api = ExternalApiConfig(enabled=False)
+
+    plaintext = external_api.generate_token(label='  tagesform  ')
+
+    assert external_api.enabled is True
+    assert len(external_api.tokens) == 1
+    assert external_api.tokens[0].label == 'tagesform'
+    assert external_api.tokens[0].token == plaintext
+    assert len(plaintext) >= 32
+
+
+def test_generate_token_can_leave_api_disabled() -> None:
+    external_api = ExternalApiConfig(enabled=False)
+
+    external_api.generate_token(label='offline', enable=False)
+
+    assert external_api.enabled is False
+    assert len(external_api.tokens) == 1
+
+
+def test_generate_token_retries_on_collision(monkeypatch) -> None:
+    external_api = ExternalApiConfig(
+        tokens=[ExternalApiToken(token='aaaaaaaaaaaaaaaa')],
+    )
+    calls = {'n': 0}
+
+    def fake_token_urlsafe(nbytes: int) -> str:
+        calls['n'] += 1
+        return 'aaaaaaaaaaaaaaaa' if calls['n'] == 1 else 'bbbbbbbbbbbbbbbb'
+
+    monkeypatch.setattr('email_server.config.secrets.token_urlsafe', fake_token_urlsafe)
+
+    plaintext = external_api.generate_token(enable=False)
+
+    assert plaintext == 'bbbbbbbbbbbbbbbb'
+    assert calls['n'] == 2
+    assert [t.token for t in external_api.tokens] == ['aaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbb']
+
+
+def test_revoke_token_at_removes_the_indexed_entry() -> None:
+    first = ExternalApiToken(token='token-one', label='one')
+    second = ExternalApiToken(token='token-two', label='two')
+    external_api = ExternalApiConfig(tokens=[first, second])
+
+    removed = external_api.revoke_token_at(0)
+
+    assert removed == first
+    assert external_api.tokens == [second]
+    assert external_api.revoke_token_at(5) is None
+    assert external_api.tokens == [second]
