@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from email_server.config import EmailServerConfig
 from email_server.auth import MicrosoftOAuth, GmailOAuth, TokenManager
+from email_server.utils.app_paths import resolve_data_path
 import msal
 
 
@@ -209,9 +210,7 @@ def gmail_callback(request):
             return _error_response("Configuration Error", "Gmail is not configured. Please configure it in BriefKorb settings.")
         
         # Get credentials path
-        credentials_path = Path(config.gmail.credentials_path)
-        if not credentials_path.is_absolute():
-            credentials_path = app_dir / credentials_path
+        credentials_path = resolve_data_path(config.gmail.credentials_path)
         
         if not credentials_path.exists():
             return _error_response("Configuration Error", f"Gmail credentials file not found at: {credentials_path}")
@@ -360,9 +359,7 @@ def sign_in_gmail(request):
         if not config.gmail.enabled or not config.gmail.credentials_path:
             return _error_response("Configuration Error", "Gmail is not configured. Please configure it in BriefKorb settings.")
 
-        credentials_path = Path(config.gmail.credentials_path)
-        if not credentials_path.is_absolute():
-            credentials_path = app_dir / credentials_path
+        credentials_path = resolve_data_path(config.gmail.credentials_path)
 
         if not credentials_path.exists():
             return _error_response("Configuration Error", f"Gmail credentials file not found at: {credentials_path}")

@@ -48,15 +48,15 @@ if "keyring" not in sys.modules:
 #     setup_logger(name) at module scope, which unconditionally creates a
 #     real log directory (~/.local/share/email_server/logs or Windows
 #     AppData) and starts writing to it on first import of each name.
-#   - AppInfoCache's default (no storage_path) instance resolves to this
-#     repo's real app_info_cache.enc/.bak* files under email_server/ and
-#     tokens/ -- both of which contain real data in a normal checkout.
+#   - AppInfoCache's default (no storage_path) instance, TokenManager's
+#     default storage and the local sender-rule JSON files all resolve under
+#     the per-user app data dir (get_app_data_dir), which holds real user
+#     data on a developer machine.
 #   - EmailServerConfig.resolve_path() (used by every view/service that
 #     loads config.yaml) defaults to the real app/email_server/config.yaml.
 #   - TokenManager() with no explicit storage_path (the fallback used inside
 #     MicrosoftOAuth, GmailOAuth, GmailProvider and MicrosoftGraphProvider
-#     when no token_manager is passed in) defaults to a cwd-relative
-#     "tokens" dir, which can resolve to this repo's real tokens/ directory.
+#     when no token_manager is passed in) defaults to the real token store.
 #   - SenderCategorizationManager (and therefore SenderBlocklist /
 #     BlockedSenderTracker, which persist through the same AppInfoCache-
 #     backed self._cache) is fully covered by BRIEFKORB_CACHE_DIR above for
@@ -65,31 +65,32 @@ if "keyring" not in sys.modules:
 #     test passes rules= explicitly, and that module has its own, unrelated
 #     real-file bootstrap: sender_categorization_rules.py's
 #     _bootstrap_local_rule_snapshots_if_allowed() writes
-#     email_client/utils/data/sender_categorization_rules.{active,default}.json
-#     from the bundled .enc the first time either is missing. In this
-#     checkout those files already exist so the write is currently a no-op,
-#     but that's incidental to current state, not guaranteed (a fresh clone
-#     or a cleaned CI checkout would trigger a real write).
+#     sender_categorization_rules.{active,default}.json into the app data dir
+#     from the bundled .enc the first time either is missing.
 #     BRIEFKORB_SKIP_SENDER_RULES_FILE_BOOTSTRAP=1 disables that write path
 #     unconditionally; it doesn't need to vary per test (nothing here is
-#     tmp_path-derived) so setdefault at module load, same as the others, is
-#     enough -- no autouse fixture re-application needed.
+#     tmp_path-derived) so setting it once at module load is enough -- no
+#     autouse fixture re-application needed.
 #
 # BRIEFKORB_CACHE_DIR / BRIEFKORB_LOG_DIR / BRIEFKORB_CONFIG_PATH /
-# BRIEFKORB_TOKEN_STORAGE_PATH must be set here, at conftest module load
+# BRIEFKORB_TOKEN_STORAGE_PATH / BRIEFKORB_DATA_DIR must be set here, at conftest module load
 # time, because pytest imports test modules (which transitively import the
 # modules above) during collection -- *before* any fixture, including an
 # autouse one, gets a chance to run. A fixture-only approach would arrive
-# too late for the very first import of each module.
+# too late for the very first import of each module. They are assigned, not
+# setdefault, so a value inherited from the shell (BRIEFKORB_DATA_DIR is also a
+# user-facing override) can never point the suite at real user data.
 _bootstrap_dir = tempfile.mkdtemp(prefix="briefkorb_tests_")
-os.environ.setdefault("BRIEFKORB_CACHE_DIR", os.path.join(_bootstrap_dir, "cache"))
-os.environ.setdefault("BRIEFKORB_LOG_DIR", os.path.join(_bootstrap_dir, "logs"))
+os.environ["BRIEFKORB_CACHE_DIR"] = os.path.join(_bootstrap_dir, "cache")
+os.environ["BRIEFKORB_LOG_DIR"] = os.path.join(_bootstrap_dir, "logs")
 # Deliberately does not exist -- matches this repo's real (unconfigured)
 # state, so config_path.exists() naturally reads False just like it does
 # against the real path today.
-os.environ.setdefault("BRIEFKORB_CONFIG_PATH", os.path.join(_bootstrap_dir, "config.yaml"))
-os.environ.setdefault("BRIEFKORB_TOKEN_STORAGE_PATH", os.path.join(_bootstrap_dir, "tokens"))
-os.environ.setdefault("BRIEFKORB_SKIP_SENDER_RULES_FILE_BOOTSTRAP", "1")
+os.environ["BRIEFKORB_CONFIG_PATH"] = os.path.join(_bootstrap_dir, "config.yaml")
+os.environ["BRIEFKORB_TOKEN_STORAGE_PATH"] = os.path.join(_bootstrap_dir, "tokens")
+# Catch-all for anything else resolved under the app data dir.
+os.environ["BRIEFKORB_DATA_DIR"] = os.path.join(_bootstrap_dir, "data")
+os.environ["BRIEFKORB_SKIP_SENDER_RULES_FILE_BOOTSTRAP"] = "1"
 os.makedirs(os.environ["BRIEFKORB_CACHE_DIR"], exist_ok=True)
 os.makedirs(os.environ["BRIEFKORB_LOG_DIR"], exist_ok=True)
 os.makedirs(os.environ["BRIEFKORB_TOKEN_STORAGE_PATH"], exist_ok=True)
@@ -121,6 +122,7 @@ def isolated_app_state(tmp_path, monkeypatch):
     cache_dir = isolation_root / "cache"
     log_dir = isolation_root / "logs"
     token_dir = isolation_root / "tokens"
+    data_dir = isolation_root / "data"
     cache_dir.mkdir(parents=True)
     log_dir.mkdir(parents=True)
     token_dir.mkdir(parents=True)
@@ -129,6 +131,7 @@ def isolated_app_state(tmp_path, monkeypatch):
     monkeypatch.setenv("BRIEFKORB_LOG_DIR", str(log_dir))
     monkeypatch.setenv("BRIEFKORB_CONFIG_PATH", str(isolation_root / "config.yaml"))
     monkeypatch.setenv("BRIEFKORB_TOKEN_STORAGE_PATH", str(token_dir))
+    monkeypatch.setenv("BRIEFKORB_DATA_DIR", str(data_dir))
 
     import email_server.utils.app_info_cache as aic
     from email_server.message_ignore_statuses import clear_session_seen

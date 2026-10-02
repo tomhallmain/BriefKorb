@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from email_server.config import EmailServerConfig, ProviderConfig
 from email_server.auth import TokenManager
+from email_server.utils.app_paths import resolve_data_path
 from email_client.utils.scope_checker import ScopeChecker
 
 LOG_LEVELS = ['DEBUG', 'INFO', 'WARNING', 'ERROR']
@@ -73,7 +74,7 @@ def _apply_posted_settings(config: EmailServerConfig, post) -> None:
     log_level = post.get('log_level', 'INFO')
     if log_level not in LOG_LEVELS:
         log_level = 'INFO'
-    config.token_storage_path = post.get('token_storage_path', 'tokens').strip() or 'tokens'
+    config.token_storage_path = str(resolve_data_path(post.get('token_storage_path', 'tokens').strip() or 'tokens'))
     config.log_level = log_level.lower()
     try:
         config.max_messages = max(1, int(post.get('max_messages', config.max_messages)))

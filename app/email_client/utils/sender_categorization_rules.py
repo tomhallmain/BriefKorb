@@ -2,7 +2,7 @@
 
 Env: ``BRIEFKORB_SENDER_RULES_ACTIVE_JSON``, ``BRIEFKORB_SENDER_RULES_JSON`` (legacy), ``BRIEFKORB_SENDER_RULES_DEFAULT_JSON``, ``BRIEFKORB_SENDER_RULES_DEFAULT_ENC``.
 
-Bootstrap writes missing ``active.json`` / ``default.json`` from the bundle unless ``BRIEFKORB_SKIP_SENDER_RULES_FILE_BOOTSTRAP`` is set.
+``active.json`` / ``default.json`` live in the app data dir; bootstrap writes them from the bundled ``.enc`` when missing unless ``BRIEFKORB_SKIP_SENDER_RULES_FILE_BOOTSTRAP`` is set.
 """
 
 from __future__ import annotations
@@ -13,18 +13,28 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Tuple
 
+from email_server.utils.app_paths import get_app_data_dir
 from email_server.utils.constants import AppInfo
 from email_server.utils.encryptor import symmetric_decrypt_data_from_file
 
 from email_client.utils.sender_categorization_rules_codec import postprocess_data_from_decryption
 
-_DATA_DIR = Path(__file__).resolve().parent / "data"
-_DEFAULT_ENC_PATH = _DATA_DIR / "sender_categorization_rules_default.enc"
-_ACTIVE_JSON_PATH = _DATA_DIR / "sender_categorization_rules.active.json"
-_DEFAULT_JSON_PATH = _DATA_DIR / "sender_categorization_rules.default.json"
+_DEFAULT_ENC_PATH = Path(__file__).resolve().parent / "data" / "sender_categorization_rules_default.enc"
+_ACTIVE_JSON_NAME = "sender_categorization_rules.active.json"
+_DEFAULT_JSON_NAME = "sender_categorization_rules.default.json"
 
-# Exposed for the encrypt script (same paths as runtime checks).
-LOCAL_ACTIVE_RULES_JSON = _ACTIVE_JSON_PATH
+# Fixed-path overrides (tests); None means <app data dir>/<name>.
+_ACTIVE_JSON_PATH: Path | None = None
+_DEFAULT_JSON_PATH: Path | None = None
+
+
+def local_active_rules_json_path() -> Path:
+    """Local active rules file; also used by the encrypt script."""
+    return _ACTIVE_JSON_PATH or get_app_data_dir() / _ACTIVE_JSON_NAME
+
+
+def _local_default_json_path() -> Path:
+    return _DEFAULT_JSON_PATH or get_app_data_dir() / _DEFAULT_JSON_NAME
 
 _RULE_KEYS = (
     "bulk_domain_markers",
@@ -82,7 +92,7 @@ def _load_bundled_encrypted_defaults() -> dict[str, Any]:
 
 
 def _bootstrap_local_rule_snapshots_if_allowed() -> None:
-    """Create gitignored active/default JSON from the bundled .enc when missing."""
+    """Create local active/default JSON from the bundled .enc when missing."""
     if os.environ.get("BRIEFKORB_SKIP_SENDER_RULES_FILE_BOOTSTRAP", "").strip().lower() in (
         "1",
         "true",
@@ -113,12 +123,11 @@ def _bootstrap_local_rule_snapshots_if_allowed() -> None:
         **body,
     }
     text = json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
-    _DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    if not _ACTIVE_JSON_PATH.is_file():
-        _ACTIVE_JSON_PATH.write_text(text, encoding="utf-8")
-    if not _DEFAULT_JSON_PATH.is_file():
-        _DEFAULT_JSON_PATH.write_text(text, encoding="utf-8")
+    for path in (local_active_rules_json_path(), _local_default_json_path()):
+        if not path.is_file():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
 
 
 def _as_markers(value: Any) -> Tuple[str, ...]:
@@ -153,13 +162,13 @@ def _resolve_active_json_path(rules_path: Path | None) -> Path:
     legacy = os.environ.get("BRIEFKORB_SENDER_RULES_JSON", "").strip()
     if legacy:
         return Path(legacy)
-    return _ACTIVE_JSON_PATH
+    return local_active_rules_json_path()
 
 
 def bundled_default_json_path() -> Path:
     """Plaintext snapshot path for the encrypt script."""
     env_path = os.environ.get("BRIEFKORB_SENDER_RULES_DEFAULT_JSON", "").strip()
-    return Path(env_path) if env_path else _DEFAULT_JSON_PATH
+    return Path(env_path) if env_path else _local_default_json_path()
 
 
 def load_sender_categorization_rules(

@@ -1,7 +1,8 @@
 """Write ``email_client/utils/data/sender_categorization_rules_default.enc``.
 
 ``--input`` copies to the default snapshot then encrypts; else active.json ->
-default then encrypt; else default.json only. ``BRIEFKORB_SENDER_RULES_DEFAULT_JSON``
+default then encrypt; else default.json only. The active/default JSON files live
+in the app data dir. ``BRIEFKORB_SENDER_RULES_DEFAULT_JSON``
 overrides snapshot path. Run from ``app/`` or with ``app`` on ``PYTHONPATH``."""
 
 from __future__ import annotations
@@ -18,8 +19,8 @@ if str(_APP_ROOT) not in sys.path:
     sys.path.insert(0, str(_APP_ROOT))
 
 from email_client.utils.sender_categorization_rules import (
-    LOCAL_ACTIVE_RULES_JSON,
     bundled_default_json_path,
+    local_active_rules_json_path,
 )
 from email_client.utils.sender_categorization_rules_codec import preprocess_data_for_encryption
 from email_server.utils.constants import AppInfo
@@ -38,15 +39,16 @@ def _pick_source(args: argparse.Namespace) -> Path:
         if not args.input.is_file():
             raise SystemExit(f"Input not found: {args.input}")
         return args.input
-    if LOCAL_ACTIVE_RULES_JSON.is_file():
-        return LOCAL_ACTIVE_RULES_JSON
+    active = local_active_rules_json_path()
+    if active.is_file():
+        return active
     default_snap = bundled_default_json_path()
     if default_snap.is_file():
         return default_snap
     raise SystemExit(
         "No plaintext rules found. Use one of:\n"
         f"  --input path/to/rules.json\n"
-        f"  create {LOCAL_ACTIVE_RULES_JSON}\n"
+        f"  create {local_active_rules_json_path()}\n"
         f"  or create {bundled_default_json_path()}"
     )
 
@@ -91,7 +93,7 @@ def main() -> None:
         shutil.copy2(source, default_snapshot)
         encrypt_from = default_snapshot
         print(f"Updated default snapshot from --input -> {default_snapshot}")
-    elif source.resolve() == LOCAL_ACTIVE_RULES_JSON.resolve():
+    elif source.resolve() == local_active_rules_json_path().resolve():
         shutil.copy2(source, default_snapshot)
         encrypt_from = default_snapshot
         print(f"Updated default snapshot from active JSON -> {default_snapshot}")

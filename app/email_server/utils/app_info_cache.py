@@ -5,6 +5,7 @@ import sys
 import threading
 from typing import Dict
 
+from .app_paths import get_app_data_dir
 from .constants import AppInfo
 from .encryptor import encrypt_data_to_file, decrypt_data_from_file
 from .logger import setup_logger
@@ -14,8 +15,6 @@ logger = setup_logger(__name__)
 
 
 class AppInfoCache():
-    CACHE_LOC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app_info_cache.enc")
-    JSON_LOC = os.path.join(os.path.dirname(os.path.abspath(os.path.dirname(__file__))), "app_info_cache.json")
     META_INFO_KEY = "info"
     DIRECTORIES_KEY = "directories"
     NUM_BACKUPS = 4  # Number of backup files to maintain
@@ -32,8 +31,9 @@ class AppInfoCache():
             self._cache_loc = os.path.join(storage_path, "app_info_cache.enc")
             self._json_loc = os.path.join(storage_path, "app_info_cache.json")
         else:
-            self._cache_loc = self.CACHE_LOC
-            self._json_loc = self.JSON_LOC
+            data_dir = get_app_data_dir()
+            self._cache_loc = os.path.join(data_dir, "app_info_cache.enc")
+            self._json_loc = os.path.join(data_dir, "app_info_cache.json")
         self.load()
         self.validate()
 

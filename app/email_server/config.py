@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import yaml
 
+from .utils.app_paths import portable_data_path, resolve_data_path
+
 @dataclass
 class ProviderConfig:
     """Configuration for a specific provider"""
@@ -141,13 +143,9 @@ class EmailServerConfig:
         with open(config_file, 'r') as f:
             config_dict = yaml.safe_load(f)
         
-        # Resolve token_storage_path relative to config file's parent directory if it's relative
-        # The config file is typically at app/email_server/config.yaml, so tokens should be at app/tokens
-        token_storage_path = config_dict.get('token_storage_path', 'tokens')
-        if token_storage_path and not Path(token_storage_path).is_absolute():
-            # Make it relative to the config file's parent directory (app/)
-            token_storage_path = str(config_file.parent.parent / token_storage_path)
-        config_dict['token_storage_path'] = token_storage_path
+        # A relative token_storage_path resolves against the per-user app data dir.
+        token_storage_path = config_dict.get('token_storage_path') or 'tokens'
+        config_dict['token_storage_path'] = str(resolve_data_path(token_storage_path))
         
         return cls.from_dict(config_dict)
     
@@ -172,7 +170,7 @@ class EmailServerConfig:
                 'scopes': self.gmail.scopes,
                 'additional_settings': self.gmail.additional_settings
             },
-            'token_storage_path': self.token_storage_path,
+            'token_storage_path': portable_data_path(self.token_storage_path),
             'log_level': self.log_level,
             'max_messages': self.max_messages,
             'external_api': {
@@ -213,7 +211,7 @@ class EmailServerConfig:
 
 def create_default_config(config_path: str) -> EmailServerConfig:
     """Create a default configuration file
-    Note: token_storage_path will be resolved relative to the config file's directory
+    Note: a relative token_storage_path is resolved against the app data directory
     """
     config = EmailServerConfig(
         microsoft=ProviderConfig(

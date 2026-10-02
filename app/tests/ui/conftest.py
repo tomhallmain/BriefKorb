@@ -26,6 +26,7 @@ if "BRIEFKORB_CACHE_DIR" not in os.environ:
     os.environ["BRIEFKORB_LOG_DIR"] = os.path.join(_tmp, "logs")
     os.environ["BRIEFKORB_CONFIG_PATH"] = os.path.join(_tmp, "config.yaml")
     os.environ["BRIEFKORB_TOKEN_STORAGE_PATH"] = os.path.join(_tmp, "tokens")
+    os.environ["BRIEFKORB_DATA_DIR"] = os.path.join(_tmp, "data")
     os.makedirs(os.environ["BRIEFKORB_CACHE_DIR"], exist_ok=True)
     os.makedirs(os.environ["BRIEFKORB_LOG_DIR"], exist_ok=True)
     os.makedirs(os.environ["BRIEFKORB_TOKEN_STORAGE_PATH"], exist_ok=True)

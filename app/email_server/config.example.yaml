@@ -19,7 +19,10 @@ microsoft:
 # Gmail API settings
 gmail:
   enabled: true
-  credentials_path: "path/to/credentials.json"
+  # Relative paths resolve against the per-user app data directory
+  # (Windows: %LOCALAPPDATA%\BriefKorb, macOS: ~/Library/Application Support/BriefKorb,
+  # Linux: ~/.local/share/BriefKorb).
+  credentials_path: "google_credentials.json"
   redirect_uri: "http://localhost:8000/auth/gmail/callback"
   scopes:
     - "https://www.googleapis.com/auth/gmail.readonly"
@@ -29,6 +32,7 @@ gmail:
     timeout: 30
 
 # General settings
+# Relative to the per-user app data directory, like credentials_path above.
 token_storage_path: "tokens"
 log_level: "INFO"
 # Cap on how many messages a single fetch/display pulls in at once (desktop

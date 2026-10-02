@@ -17,6 +17,7 @@ from PySide6.QtGui import QDesktopServices
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from email_server.config import EmailServerConfig, ProviderConfig
+from email_server.utils.app_paths import portable_data_path, resolve_data_path
 from email_client.utils.scope_checker import ScopeChecker
 
 
@@ -362,13 +363,7 @@ class AuthSettingsDialog(QDialog):
             "JSON Files (*.json);;All Files (*)"
         )
         if file_path:
-            # Make path relative to app directory if possible
-            app_dir = Path(__file__).parent.parent.parent
-            try:
-                rel_path = Path(file_path).relative_to(app_dir)
-                self.gmail_credentials_path.setText(str(rel_path))
-            except ValueError:
-                self.gmail_credentials_path.setText(file_path)
+            self.gmail_credentials_path.setText(portable_data_path(file_path))
     
     def _update_auth_status(self):
         """Update authentication status labels for each provider"""
@@ -438,7 +433,7 @@ class AuthSettingsDialog(QDialog):
                 item.setCheckState(Qt.Checked)
         
         # General settings
-        self.token_storage_path.setText(self.config.token_storage_path)
+        self.token_storage_path.setText(portable_data_path(self.config.token_storage_path))
         index = self.log_level.findText(self.config.log_level.upper())
         if index >= 0:
             self.log_level.setCurrentIndex(index)
@@ -471,28 +466,13 @@ class AuthSettingsDialog(QDialog):
             self.config.gmail.enabled = self.gmail_enabled.isChecked()
             credentials_path = self.gmail_credentials_path.text().strip()
             if credentials_path:
-                # Convert to absolute path if relative, then make relative to app dir if possible
-                if not Path(credentials_path).is_absolute():
-                    app_dir = Path(__file__).parent.parent.parent
-                    abs_path = app_dir / credentials_path
-                    # Try to make it relative to app_dir for cleaner config
-                    try:
-                        credentials_path = str(abs_path.relative_to(app_dir))
-                    except ValueError:
-                        credentials_path = str(abs_path)
-                else:
-                    # If absolute, try to make relative to app_dir
-                    app_dir = Path(__file__).parent.parent.parent
-                    try:
-                        credentials_path = str(Path(credentials_path).relative_to(app_dir))
-                    except ValueError:
-                        pass  # Keep absolute if can't make relative
+                credentials_path = portable_data_path(credentials_path)
             self.config.gmail.credentials_path = credentials_path or None
             self.config.gmail.redirect_uri = self.gmail_redirect_uri.text().strip() or None
             self.config.gmail.scopes = self._get_selected_scopes(self.gmail_scopes_list)
             
             # Update general settings
-            self.config.token_storage_path = self.token_storage_path.text().strip() or "tokens"
+            self.config.token_storage_path = str(resolve_data_path(self.token_storage_path.text().strip() or "tokens"))
             self.config.log_level = self.log_level.currentText().lower()
             self.config.max_messages = self.max_messages.value()
             self.config.external_api.enabled = self.external_api_enabled.isChecked()
@@ -608,10 +588,7 @@ class AuthSettingsDialog(QDialog):
             return
         
         # Check if credentials file exists
-        credentials_path = Path(self.config.gmail.credentials_path)
-        if not credentials_path.is_absolute():
-            app_dir = Path(__file__).parent.parent.parent
-            credentials_path = app_dir / credentials_path
+        credentials_path = resolve_data_path(self.config.gmail.credentials_path)
         
         if not credentials_path.exists():
             QMessageBox.warning(

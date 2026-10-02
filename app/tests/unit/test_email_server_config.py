@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
 from email_server.config import (
     EmailServerConfig,
     ExternalApiConfig,
@@ -126,7 +128,9 @@ def test_save_and_from_file_round_trip(tmp_path: Path) -> None:
     assert loaded.microsoft.redirect_uri == 'http://x/callback'
 
 
-def test_from_file_resolves_relative_token_storage_path_against_config_parent(tmp_path: Path) -> None:
+def test_from_file_resolves_relative_token_storage_path_against_app_data_dir(tmp_path: Path, monkeypatch) -> None:
+    data_dir = tmp_path / 'data'
+    monkeypatch.setenv('BRIEFKORB_DATA_DIR', str(data_dir))
     email_server_dir = tmp_path / 'email_server'
     email_server_dir.mkdir()
     config_path = email_server_dir / 'config.yaml'
@@ -137,10 +141,20 @@ def test_from_file_resolves_relative_token_storage_path_against_config_parent(tm
 
     loaded = EmailServerConfig.from_file(str(config_path))
 
-    # app/email_server/config.yaml -> token_storage_path resolves relative to app/ (the
-    # config file's grandparent), matching the real repo layout (app/email_server/ and
-    # app/tokens/ as siblings).
-    assert loaded.token_storage_path == str(tmp_path / 'tokens')
+    assert loaded.token_storage_path == str(data_dir / 'tokens')
+
+
+def test_save_writes_token_storage_path_inside_app_data_dir_as_relative(tmp_path: Path, monkeypatch) -> None:
+    data_dir = tmp_path / 'data'
+    monkeypatch.setenv('BRIEFKORB_DATA_DIR', str(data_dir))
+    config_path = tmp_path / 'config.yaml'
+    EmailServerConfig.from_dict({
+        **_minimal_config_dict(),
+        'token_storage_path': str(data_dir / 'tokens'),
+    }).save(str(config_path))
+
+    assert yaml.safe_load(config_path.read_text())['token_storage_path'] == 'tokens'
+    assert EmailServerConfig.from_file(str(config_path)).token_storage_path == str(data_dir / 'tokens')
 
 
 def test_from_file_leaves_absolute_token_storage_path_untouched(tmp_path: Path) -> None:

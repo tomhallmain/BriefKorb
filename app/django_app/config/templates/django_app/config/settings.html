@@ -149,7 +149,7 @@
                value="{{ config.gmail.credentials_path|default:'' }}">
         <small class="form-text text-muted">
           Path to the OAuth 2.0 credentials JSON downloaded from Google Cloud Console.
-          Relative paths are resolved from the <code>app/</code> directory.
+          Relative paths resolve from the per-user app data directory.
         </small>
       </div>
 
@@ -186,7 +186,7 @@
                placeholder="tokens"
                value="{{ config.token_storage_path|default:'tokens' }}">
         <small class="form-text text-muted">
-          Directory where OAuth tokens are persisted. Relative paths resolve from <code>app/</code>.
+          Directory where OAuth tokens are persisted. Relative paths resolve from the per-user app data directory.
         </small>
       </div>
 

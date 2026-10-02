@@ -143,6 +143,15 @@ You'll need to set up API credentials for both Microsoft Graph API and Gmail API
 4. Add `http://localhost:8000/auth/gmail/callback` as an authorised redirect URI
 5. Set `credentials_path` in `config.yaml` to the path of your downloaded `credentials.json`
 
+### Local data location
+
+Per-user runtime data (OAuth tokens, encrypted caches, the entity graph, local
+sender-rule JSON) lives in the per-user app data directory, not in the repo:
+`%LOCALAPPDATA%\BriefKorb` on Windows, `~/Library/Application Support/BriefKorb`
+on macOS, `~/.local/share/BriefKorb` on Linux (override with `BRIEFKORB_DATA_DIR`).
+Relative `token_storage_path` and `credentials_path` values in `config.yaml`
+resolve against that directory.
+
 ## Architecture
 
 The application is structured in two main components:
