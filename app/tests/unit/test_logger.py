@@ -8,12 +8,13 @@ conftest.py's bootstrap, and never touch a real user log directory.
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from email_server.utils import logger as logger_module
-from email_server.utils.logger import cleanup_old_logs, get_log_directory, setup_logger
+from email_server.utils.logger import DailyFileHandler, get_log_directory, setup_logger
 
 
 def test_get_log_directory_honors_briefkorb_log_dir_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -48,15 +49,50 @@ def test_setup_logger_does_not_duplicate_handlers_on_repeat_call(tmp_path: Path,
     first.handlers.clear()
 
 
-def test_cleanup_old_logs_keeps_only_three_most_recent(tmp_path: Path) -> None:
-    log_file = 'email_server.log'
-    paths = []
-    for i in range(5):
-        p = tmp_path / f'{log_file}.{i}'
+def test_loggers_share_one_file_handler(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv('BRIEFKORB_LOG_DIR', str(tmp_path))
+
+    first = setup_logger('test_logger_shared_a')
+    second = setup_logger('test_logger_shared_b')
+
+    file_handlers = {h for h in first.handlers + second.handlers if isinstance(h, logging.FileHandler)}
+    assert len(file_handlers) == 1
+    for handler in file_handlers:
+        handler.close()
+    first.handlers.clear()
+    second.handlers.clear()
+
+
+def _record_at(when: datetime) -> logging.LogRecord:
+    record = logging.LogRecord('test', logging.INFO, __file__, 0, 'message', None, None)
+    record.created = when.timestamp()
+    return record
+
+
+def test_daily_file_handler_writes_to_dated_file_and_switches_on_new_day(tmp_path: Path) -> None:
+    handler = DailyFileHandler(tmp_path, 'email_server.log')
+    today = date.today()
+    tomorrow = today + timedelta(days=1)
+    try:
+        handler.emit(_record_at(datetime.now()))
+        handler.emit(_record_at(datetime.combine(tomorrow, datetime.min.time())))
+    finally:
+        handler.close()
+
+    assert (tmp_path / f'email_server.{today.isoformat()}.log').read_text(encoding='utf-8').strip() == 'message'
+    assert (tmp_path / f'email_server.{tomorrow.isoformat()}.log').read_text(encoding='utf-8').strip() == 'message'
+
+
+def test_daily_file_handler_prunes_only_dated_files_past_retention(tmp_path: Path) -> None:
+    today = date.today()
+    old = tmp_path / f'email_server.{(today - timedelta(days=4)).isoformat()}.log'
+    kept = tmp_path / f'email_server.{(today - timedelta(days=3)).isoformat()}.log'
+    unrelated = tmp_path / 'email_server.log.2020-01-01'
+    for p in (old, kept, unrelated):
         p.write_text('log entry')
-        paths.append(p)
 
-    cleanup_old_logs(tmp_path, log_file)
+    DailyFileHandler(tmp_path, 'email_server.log', retention_days=3).close()
 
-    remaining = sorted(tmp_path.glob(f'{log_file}*'))
-    assert len(remaining) == 3
+    assert not old.exists()
+    assert kept.exists()
+    assert unrelated.exists()

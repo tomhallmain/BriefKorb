@@ -1,10 +1,11 @@
 import os
+import re
 import logging
-from logging.handlers import TimedRotatingFileHandler
+from datetime import date, datetime, timedelta
 from pathlib import Path
 import platform
-import glob
-import time
+
+LOG_RETENTION_DAYS = 3  # previous days' files kept alongside today's
 
 def get_log_directory():
     """Get the appropriate log directory based on the operating system.
@@ -30,131 +31,107 @@ def get_log_directory():
     else:
         # Use ~/.local/share for Linux/Mac
         log_dir = Path.home() / '.local' / 'share' / 'email_server' / 'logs'
-    
+
     # Create directory if it doesn't exist
     log_dir.mkdir(parents=True, exist_ok=True)
     return log_dir
 
-class WindowsCompatibleTimedRotatingFileHandler(TimedRotatingFileHandler):
-    """A TimedRotatingFileHandler that works on Windows by closing the file before rotation."""
-    
-    def emit(self, record):
-        """Override emit to handle rotation errors gracefully."""
-        try:
-            super().emit(record)
-        except (PermissionError, OSError) as e:
-            # If rotation fails due to file locking, try to handle it gracefully
-            # This can happen if another process has the file open
-            self.handleError(record)
-            # Try to reopen the stream if it was closed
-            if self.stream is None or self.stream.closed:
-                try:
-                    self.stream = self._open()
-                except Exception:
-                    pass
-    
-    def doRollover(self):
-        """Override doRollover to close the file before rotating on Windows."""
-        if self.stream:
-            self.stream.close()
-            self.stream = None
-        
-        # Try to rotate with retries for Windows file locking issues
-        max_retries = 3
-        retry_delay = 0.1
-        
-        for attempt in range(max_retries):
-            try:
-                super().doRollover()
-                break
-            except (PermissionError, OSError) as e:
-                if attempt < max_retries - 1:
-                    # Wait a bit and try again
-                    time.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
-                else:
-                    # Last attempt failed, log the error but don't crash
-                    # We'll try to reopen the stream for continued logging
-                    try:
-                        self.stream = self._open()
-                    except Exception:
-                        pass
-                    # Don't raise - just log to stderr as a fallback
-                    import sys
-                    print(f"Warning: Could not rotate log file {self.baseFilename}: {e}", file=sys.stderr)
+class DailyFileHandler(logging.FileHandler):
+    """Appends to ``<stem>.<YYYY-MM-DD><suffix>`` and opens a new file when a
+    record's date passes the current file's.
 
-def cleanup_old_logs(log_dir, log_file):
-    """Clean up old log files, keeping only the 3 most recent ones.
-    
-    Args:
-        log_dir: Path to the log directory
-        log_file: Base name of the log file
+    Files are never renamed: on Windows a rename fails while any other handle
+    on the file is open, and the desktop app and its Django subprocess both
+    log to the same directory. Both processes can append to the same day's file.
     """
-    # Get all log files matching the pattern
-    log_pattern = str(log_dir / f"{log_file}*")
-    log_files = sorted(glob.glob(log_pattern))
-    
-    # If we have more than 3 files, delete the oldest ones
-    if len(log_files) > 3:
-        # Sort by modification time (oldest first)
-        log_files.sort(key=lambda x: os.path.getmtime(x))
-        # Delete oldest files, keeping only the 3 most recent
-        for old_file in log_files[:-3]:
+
+    def __init__(self, log_dir, log_file, retention_days=LOG_RETENTION_DAYS):
+        self._log_dir = Path(log_dir)
+        self._stem, self._suffix = Path(log_file).stem, Path(log_file).suffix
+        self._retention_days = retention_days
+        self._date = date.today()
+        self._dated_name = re.compile(
+            rf"^{re.escape(self._stem)}\.(\d{{4}}-\d{{2}}-\d{{2}}){re.escape(self._suffix)}$"
+        )
+        super().__init__(self._path_for(self._date), encoding='utf-8', delay=True)
+        self._prune()
+
+    def _path_for(self, day: date) -> Path:
+        return self._log_dir / f"{self._stem}.{day.isoformat()}{self._suffix}"
+
+    def emit(self, record):
+        record_date = datetime.fromtimestamp(record.created).date()
+        if record_date > self._date:
+            if self.stream:
+                self.stream.close()
+                self.stream = None
+            self._date = record_date
+            self.baseFilename = os.path.abspath(self._path_for(record_date))
+            self._prune()
+        super().emit(record)  # reopens self.stream on baseFilename when None
+
+    def _prune(self):
+        """Delete dated files older than the retention window. Failures are
+        ignored: another process may be pruning or holding the same file, and
+        pruning runs again at the next date change or startup."""
+        cutoff = self._date - timedelta(days=self._retention_days)
+        try:
+            names = os.listdir(self._log_dir)
+        except OSError:
+            return
+        for name in names:
+            m = self._dated_name.match(name)
+            if not m:
+                continue
             try:
-                os.remove(old_file)
-            except OSError as e:
-                print(f"Warning: Could not delete old log file {old_file}: {e}")
+                if date.fromisoformat(m.group(1)) < cutoff:
+                    os.remove(self._log_dir / name)
+            except (ValueError, OSError):
+                pass
+
+# One handler set per (log dir, log file), shared by every logger that
+# setup_logger configures -- separate handlers would each hold their own
+# handle on the same file.
+_shared_handlers: dict[tuple[str, str], list[logging.Handler]] = {}
+
+def _get_shared_handlers(log_file):
+    log_dir = get_log_directory()
+    key = (str(log_dir), log_file)
+    handlers = _shared_handlers.get(key)
+    if handlers is None:
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        file_handler = DailyFileHandler(log_dir, log_file)
+        console_handler = logging.StreamHandler()
+        file_handler.setFormatter(formatter)
+        console_handler.setFormatter(formatter)
+        handlers = _shared_handlers[key] = [file_handler, console_handler]
+    return handlers
 
 def setup_logger(name, log_file='email_server.log'):
-    """Set up a logger with timed rotating file handler and console output.
-    
+    """Set up a logger writing to a daily log file and the console.
+
     Args:
         name: Name of the logger
-        log_file: Name of the log file
-    
+        log_file: Base name of the log file; the date is inserted before the
+            extension (email_server.log -> email_server.2026-01-31.log)
+
     Returns:
         logging.Logger: Configured logger instance
     """
     logger = logging.getLogger(name)
-    
+
     # Don't add handlers if they already exist (prevent duplicate handlers)
     if logger.handlers:
         return logger
-    
+
     # Prevent propagation to parent loggers to avoid duplicate logs
     logger.propagate = False
-    
+
     logger.setLevel(logging.INFO)
-    
-    # Create rotating file handler
-    log_dir = get_log_directory()
-    log_path = log_dir / log_file
-    
-    # Clean up any old log files before setting up the handler
-    cleanup_old_logs(log_dir, log_file)
-    
-    # Rotate logs daily and keep 3 days of history
-    # Use Windows-compatible handler to avoid file locking issues
-    file_handler = WindowsCompatibleTimedRotatingFileHandler(
-        log_path,
-        when='midnight',  # Rotate at midnight
-        interval=1,       # Every day
-        backupCount=3,    # Keep 3 days of logs
-        encoding='utf-8'
-    )
-    
-    # Create console handler
-    console_handler = logging.StreamHandler()
-    
-    # Create formatter
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    file_handler.setFormatter(formatter)
-    console_handler.setFormatter(formatter)
-    
-    # Add handlers to logger
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
-    
-    return logger 
+
+    for handler in _get_shared_handlers(log_file):
+        logger.addHandler(handler)
+
+    return logger
